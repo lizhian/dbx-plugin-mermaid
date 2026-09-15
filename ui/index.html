@@ -1489,6 +1489,8 @@
             // Event Listeners
             editor.addEventListener('input', function () {
                 state.currentCode = this.value;
+                const currentTab = state.tabs.find(t => t.id === state.activeTabId);
+                if (currentTab) currentTab.code = this.value;
                 updateEditorUI();
             });
 
@@ -1595,7 +1597,8 @@
         async function renderMermaid() {
             const preview = document.getElementById('mermaidPreview');
             const activeTab = state.tabs.find(t => t.id === state.activeTabId);
-            const code = activeTab ? (activeTab.code || INITIAL_CODE) : document.getElementById('mermaidEditor').value;
+            const editorValue = document.getElementById('mermaidEditor').value;
+            const code = editorValue.trim() ? editorValue : (activeTab?.code || INITIAL_CODE);
 
             if (!code.trim()) {
                 preview.innerHTML = `
@@ -2368,10 +2371,10 @@
             document.getElementById('fitToScreenBtn').addEventListener('click', fitToScreen);
             document.getElementById('copyImageBtn').addEventListener('click', copyImageToClipboard);
             document.getElementById('refreshBtn').addEventListener('click', function () {
-                const icon = this.querySelector('i');
-                icon.classList.add('fa-spin');
+                const icon = this.querySelector('[data-lucide]');
+                icon?.classList.add('is-spinning');
                 renderMermaid().then(() => {
-                    setTimeout(() => icon.classList.remove('fa-spin'), 500);
+                    setTimeout(() => icon?.classList.remove('is-spinning'), 500);
                 });
             });
 
@@ -2443,6 +2446,7 @@
         }
 
         [data-lucide] { width: 1em; height: 1em; stroke-width: 2; }
+        .is-spinning { animation: spin 1s linear infinite; }
         #clearBtn > span, #copyBtn > span, #formatBtn > span, #copyImageBtn > span, #exportBtn > span, #exportMarkdownBtn > span, #importMarkdownBtn > span { display: none; }
 
         .header-icon { width: 20px !important; height: 20px !important; flex: 0 0 20px; }
