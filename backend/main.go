@@ -18,6 +18,7 @@ type plugin struct {
 	mu      sync.Mutex
 	dbs     map[string]*sql.DB
 	configs map[string]map[string]any
+	objects map[string]map[string]string
 }
 
 func str(m map[string]any, k string) string { v, _ := m[k].(string); return v }
@@ -109,7 +110,15 @@ func (p *plugin) db(id string) (*sql.DB, error) {
 func (p *plugin) list(id, prefix string) (any, *dbx.PluginError) {
 	d, e := p.db(id)
 	if e != nil {
-		return nil, dbx.NewError(-32000, e.Error())
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		out := []any{}
+		for k, b := range p.objects[id] {
+			if len(prefix) == 0 || len(k) >= len(prefix) && k[:len(prefix)] == prefix {
+				out = append(out, map[string]any{"name": k, "key": k, "kind": "file", "size": len(b)})
+			}
+		}
+		return map[string]any{"items": out}, nil
 	}
 	rows, e := d.Query(`SELECT key,length(body),updated_at FROM documents WHERE key LIKE ? ORDER BY key`, prefix+"%")
 	if e != nil {
@@ -129,7 +138,13 @@ func (p *plugin) list(id, prefix string) (any, *dbx.PluginError) {
 func (p *plugin) read(id, key string) (any, *dbx.PluginError) {
 	d, e := p.db(id)
 	if e != nil {
-		return nil, dbx.NewError(-32000, e.Error())
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		b, ok := p.objects[id][key]
+		if !ok {
+			return nil, dbx.NewError(-32004, "not found")
+		}
+		return map[string]any{"body": b}, nil
 	}
 	var b string
 	if e = d.QueryRow(`SELECT body FROM documents WHERE key=?`, key).Scan(&b); e != nil {
@@ -140,7 +155,10 @@ func (p *plugin) read(id, key string) (any, *dbx.PluginError) {
 func (p *plugin) write(id, key, body string) (any, *dbx.PluginError) {
 	d, e := p.db(id)
 	if e != nil {
-		return nil, dbx.NewError(-32000, e.Error())
+		p.mu.Lock()
+		p.objects[id][key] = body
+		p.mu.Unlock()
+		return map[string]any{"success": true}, nil
 	}
 	_, e = d.Exec(`INSERT INTO documents(key,body) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET body=excluded.body,updated_at=CURRENT_TIMESTAMP`, key, body)
 	if e != nil {
@@ -192,7 +210,7 @@ func (p *plugin) history(id, key string) (any, *dbx.PluginError) {
 	return map[string]any{"versions": out}, nil
 }
 func main() {
-	p := &plugin{dbs: map[string]*sql.DB{}, configs: map[string]map[string]any{}}
+	p := &plugin{dbs: map[string]*sql.DB{}, configs: map[string]map[string]any{}, objects: map[string]map[string]string{}}
 	s := dbx.NewServer(dbx.Metadata{ID: "io.github.lizhian.mermaid", Version: "0.1.0", Capabilities: []string{"connections", "storage"}}, p)
 	if e := s.Serve(); e != nil {
 		log.Fatal(e)

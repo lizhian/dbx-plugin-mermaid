@@ -42,126 +42,25 @@
         };
 
         // --- Storage Abstraction ---
-        class StorageProvider {
-            constructor(config) {
-                this.config = config;
+        class DBXStorageProvider {
+            constructor(config) { this.config = config || {}; this.connectionId = this.config.connectionId || window.dbxPlugin?.context?.connectionId; }
+            async call(method, params={}) {
+                await window.dbxPlugin.ready;
+                const result = await window.dbxPlugin.invoke(method, { ...params, connectionId: this.connectionId }, { timeoutMs: 30000 });
+                return result || {};
             }
-
-            async list(prefix) {
-                throw new Error("Not implemented");
-            }
-
-            async get(key) {
-                throw new Error("Not implemented");
-            }
-
-            async put(key, body) {
-                throw new Error("Not implemented");
-            }
-
-            async delete(key) {
-                throw new Error("Not implemented");
-            }
-
-            async deleteMany(keys) {
-                throw new Error("Not implemented");
-            }
-
-            async copy(source, target) {
-                throw new Error("Not implemented");
-            }
-
-            async head(key) {
-                throw new Error("Not implemented");
-            }
+            async list(prefix='') { const r=await this.call('storage/list',{prefix}); return {Contents:(r.items||r.entries||[]).map(x=>({Key:x.key||x.uri||x.name,Size:x.size,LastModified:x.modifiedAt})),CommonPrefixes:(r.directories||[]).map(x=>({Prefix:x.uri||x.name}))}; }
+            async get(key) { const r=await this.call('storage/read',{key}); return {body:r.body ?? (r.dataBase64 ? atob(r.dataBase64) : ''),lastModified:r.lastModified,size:r.size}; }
+            async put(key,body) { return this.call('storage/write',{key,body}); }
+            async delete(key) { return this.call('storage/delete',{key}); }
+            async deleteMany(keys) { for (const x of (keys||[])) await this.delete(x.Key||x.key); }
+            async copy(source,target) { return this.call('storage/copy',{source,target}); }
+            async head(key) { return this.call('storage/head',{key}); }
         }
-
-        class S3StorageProvider extends StorageProvider {
-            constructor(config) {
-                super(config);
-                if (!config || !config.accessKeyId || !config.secretAccessKey) {
-                    this.client = null;
-                    return;
-                }
-                this.client = new AWS.S3({
-                    accessKeyId: config.accessKeyId,
-                    secretAccessKey: config.secretAccessKey,
-                    region: config.region,
-                    endpoint: config.endpoint,
-                    s3ForcePathStyle: true
-                });
-                this.bucket = config.bucket;
-            }
-
-            _checkClient() {
-                if (!this.client) throw new Error("S3 Client not initialized");
-            }
-
-            async list(prefix) {
-                this._checkClient();
-                const params = { Bucket: this.bucket, Prefix: prefix, Delimiter: '/' };
-                return this.client.listObjectsV2(params).promise();
-            }
-
-            async get(key) {
-                this._checkClient();
-                const data = await this.client.getObject({ Bucket: this.bucket, Key: key }).promise();
-                return {
-                    body: data.Body.toString('utf-8'),
-                    lastModified: data.LastModified,
-                    size: data.ContentLength
-                };
-            }
-
-            async put(key, body) {
-                this._checkClient();
-                return this.client.putObject({
-                    Bucket: this.bucket,
-                    Key: key,
-                    Body: body,
-                    ContentType: 'text/markdown'
-                }).promise();
-            }
-
-            async delete(key) {
-                this._checkClient();
-                return this.client.deleteObject({ Bucket: this.bucket, Key: key }).promise();
-            }
-
-            async deleteMany(keys) {
-                this._checkClient();
-                if (!keys || keys.length === 0) return;
-                return this.client.deleteObjects({
-                    Bucket: this.bucket,
-                    Delete: { Objects: keys }
-                }).promise();
-            }
-
-            async copy(sourceKey, targetKey) {
-                this._checkClient();
-                return this.client.copyObject({
-                    Bucket: this.bucket,
-                    CopySource: encodeURIComponent(`${this.bucket}/${sourceKey}`),
-                    Key: targetKey
-                }).promise();
-            }
-
-            async head(key) {
-                this._checkClient();
-                return this.client.headObject({ Bucket: this.bucket, Key: key }).promise();
-            }
-        }
-
         const remoteStorage = {
             provider: null,
-            init(config) {
-                if (config) {
-                    this.provider = new S3StorageProvider(config);
-                }
-            },
-            isReady() {
-                return !!this.provider && !!this.provider.client;
-            }
+            init(config) { this.provider = new DBXStorageProvider(config); },
+            isReady() { return !!this.provider && !!window.dbxPlugin; }
         };
 
         const INITIAL_CODE = `flowchart TD
@@ -473,7 +372,7 @@
 
         function updateS3Client() {
             if (!state.s3Config) return;
-            remoteStorage.init(state.s3Config);
+            remoteStorage.init({ ...(state.s3Config || {}), connectionId: window.dbxPlugin?.context?.connectionId });
         }
 
         async function saveS3Config() {
