@@ -2444,6 +2444,22 @@
             background: #a8a8a8;
         }
 
+        /* DBX sandbox fallback icons: keep the UI self-contained when webfonts are blocked. */
+        .fas, .far, .fab { font-family: Arial, sans-serif !important; font-style: normal; display: inline-block; }
+        .fa-trash-alt::before { content: "\1F5D1"; } .fa-copy::before { content: "\2398"; }
+        .fa-code::before { content: "</>"; font-weight: 700; } .fa-camera::before { content: "\1F4F7"; }
+        .fa-download::before { content: "\2B07"; } .fa-file-export::before { content: "\1F4E4"; }
+        .fa-file-import::before { content: "\1F4E5"; } .fa-plus::before { content: "+"; font-weight: 700; }
+        .fa-search-minus::before { content: "\2212"; font-weight: 700; } .fa-search-plus::before { content: "+"; font-weight: 700; }
+        .fa-expand::before { content: "\2922"; } .fa-refresh::before, .fa-sync-alt::before { content: "\21BB"; }
+        .fa-chart-bar::before { content: "\2581\2585\2588"; letter-spacing: -2px; } .fa-check::before, .fa-check-circle::before { content: "\2713"; }
+        .fa-times::before { content: "\00D7"; } .fa-folder::before, .fa-folder-plus::before { content: "\1F4C1"; }
+        .fa-edit::before { content: "\270E"; } .fa-file-alt::before { content: "\1F4C4"; }
+        .fa-spinner::before { content: "\27F3"; } .fa-history::before { content: "\21BA"; }
+        .fa-hdd::before { content: "\1F4BE"; } .fa-cloud::before, .fa-cloud-upload-alt::before { content: "\2601"; }
+        .fa-info-circle::before { content: "\2139"; } .fa-exclamation-circle::before { content: "!"; }
+        .fa-file-medical::before { content: "\1F4C4+"; } .fa-cog::before { content: "\2699"; }
+
         .header-icon { width: 20px !important; height: 20px !important; flex: 0 0 20px; }
 
         .mermaid svg {
