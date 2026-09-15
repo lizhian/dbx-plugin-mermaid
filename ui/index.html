@@ -2443,7 +2443,7 @@
         }
 
         [data-lucide] { width: 1em; height: 1em; stroke-width: 2; }
-        .toolbar-action > span { display: none; }
+        #clearBtn > span, #copyBtn > span, #formatBtn > span, #copyImageBtn > span, #exportBtn > span, #exportMarkdownBtn > span, #importMarkdownBtn > span { display: none; }
 
         .header-icon { width: 20px !important; height: 20px !important; flex: 0 0 20px; }
 
@@ -2646,7 +2646,7 @@
                 <span class="text-xs text-gray-400">
                     双击标签名称可修改
                 </span>
-                <button id="clearBtn" class="toolbar-action" title="清空"
+                <button id="clearBtn" title="清空"
                     class="flex items-center justify-center w-8 h-8 bg-gray-100 hover:bg-red-100 text-gray-700 hover:text-red-700 px-2 py-1 rounded text-xs font-medium transition">
                     <i data-lucide="trash-2" aria-hidden="true"></i><span>清空</span>
                 </button>
@@ -2655,35 +2655,35 @@
                     行数: <span id="lineCount" class="font-medium text-gray-700">1</span> | 字符: <span id="charCount"
                         class="font-medium text-gray-700">0</span>
                 </div>
-                <button id="copyBtn" class="toolbar-action" title="复制代码"
+                <button id="copyBtn" title="复制代码"
                     class="flex items-center justify-center w-8 h-8 bg-yellow-50 hover:bg-yellow-100 text-yellow-700 px-2 py-1 rounded text-xs font-medium transition">
                     
                     <i data-lucide="copy" aria-hidden="true"></i><span>复制代码</span>
                 </button>
 
-                <button id="formatBtn" class="toolbar-action" title="格式化"
+                <button id="formatBtn" title="格式化"
                     class="flex items-center justify-center w-8 h-8 bg-blue-50 hover:bg-blue-100 text-blue-700 px-2 py-1 rounded text-xs font-medium transition">
                     
                     <i data-lucide="code-2" aria-hidden="true"></i><span>格式化</span>
                 </button>
 
-                <button id="copyImageBtn" class="toolbar-action" title="复制图片"
+                <button id="copyImageBtn" title="复制图片"
                     class="flex items-center justify-center w-8 h-8 bg-purple-50 hover:bg-purple-100 text-purple-700 px-2 py-1 rounded text-xs font-medium transition">
                     
                     <i data-lucide="camera" aria-hidden="true"></i><span>复制图片</span>
                 </button>
 
-                <button id="exportBtn" class="toolbar-action" title="导出图片"
+                <button id="exportBtn" title="导出图片"
                     class="flex items-center justify-center w-8 h-8 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 px-2 py-1 rounded text-xs font-medium transition">
                     
                     <i data-lucide="download" aria-hidden="true"></i><span>导出图片</span>
                 </button>
-                <button id="exportMarkdownBtn" class="toolbar-action" title="导出 Markdown"
+                <button id="exportMarkdownBtn" title="导出 Markdown"
                     class="flex items-center justify-center w-8 h-8 bg-green-50 hover:bg-green-100 text-green-700 px-2 py-1 rounded text-xs font-medium transition">
                     
                     <i data-lucide="file-output" aria-hidden="true"></i><span>导出MD</span>
                 </button>
-                <button id="importMarkdownBtn" class="toolbar-action" title="导入 Markdown"
+                <button id="importMarkdownBtn" title="导入 Markdown"
                     class="flex items-center justify-center w-8 h-8 bg-orange-50 hover:bg-orange-100 text-orange-700 px-2 py-1 rounded text-xs font-medium transition">
                     
                     <i data-lucide="file-input" aria-hidden="true"></i><span>导入MD</span>
