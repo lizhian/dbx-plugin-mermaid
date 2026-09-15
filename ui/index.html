@@ -887,11 +887,11 @@
             const statusEl = document.getElementById('fileStatusDisplay');
             const saveBtn = document.getElementById('footerSaveBtn');
             const newBtn = document.getElementById('footerNewBtn');
-            const icon = statusEl.querySelector('i');
+            const icon = statusEl.querySelector('i, [data-lucide]');
             const text = statusEl.querySelector('span');
 
             if (state.currentFile.type === 'local') {
-                icon.className = 'fas fa-hdd text-gray-500';
+                if (icon) icon.className = 'text-gray-500';
                 text.textContent = '本地存储 (未同步)';
                 text.className = 'font-mono text-gray-500';
                 saveBtn.classList.remove('hidden');
@@ -900,7 +900,7 @@
             } else {
                 let displayName = state.currentFile.key;
 
-                icon.className = 'fas fa-cloud text-green-600';
+                if (icon) icon.className = 'text-green-600';
                 text.textContent = displayName;
                 text.className = 'font-mono text-green-700 font-medium';
                 saveBtn.classList.remove('hidden');
