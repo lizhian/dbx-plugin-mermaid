@@ -1944,6 +1944,14 @@
             return canvas;
         }
 
+        async function copyTextSafe(text) {
+            try { if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(text); return true; } } catch (_) {}
+            const area = document.createElement('textarea'); area.value = text; area.style.position = 'fixed'; area.style.opacity = '0';
+            document.body.appendChild(area); area.focus(); area.select();
+            let ok = false; try { ok = document.execCommand('copy'); } catch (_) {} area.remove();
+            return ok;
+        }
+
         async function copyImageToClipboard() {
             const format = state.uiConfig.copyFormat || 'png';
             const preview = document.getElementById('mermaidPreview');
@@ -1959,7 +1967,7 @@
                 if (format === 'svg') {
                     const { svg } = prepareSvgForExport(svgElement);
                     const svgString = new XMLSerializer().serializeToString(svg);
-                    await navigator.clipboard.writeText(svgString);
+                    if (!await copyTextSafe(svgString)) throw new Error('当前 DBX 沙箱禁止访问剪贴板，请使用导出 SVG');
                     showNotification('SVG 代码已复制', 'success');
                     return;
                 }
@@ -1970,11 +1978,13 @@
 
                 if (!blob) throw new Error("无法生成图片 Blob");
 
-                await navigator.clipboard.write([
-                    new ClipboardItem({ [blob.type]: blob })
-                ]);
-
-                showNotification(`图片 (${format.toUpperCase()}) 已复制`, 'success');
+                if (navigator.clipboard?.write && window.ClipboardItem) {
+                    await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+                    showNotification(`图片 (${format.toUpperCase()}) 已复制`, 'success');
+                } else {
+                    const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `mermaid.${format}`; a.click(); URL.revokeObjectURL(url);
+                    showNotification('当前沙箱禁止图片剪贴板，已改为下载文件', 'info');
+                }
 
             } catch (err) {
                 console.error('Copy Image failed:', err);
@@ -2077,7 +2087,8 @@
 
         function copyCode() {
             const code = document.getElementById('mermaidEditor').value;
-            navigator.clipboard.writeText(code).then(() => {
+            copyTextSafe(code).then((ok) => {
+                if (!ok) { showNotification('当前 DBX 沙箱禁止访问剪贴板，请手动复制', 'info'); return; }
                 const btn = document.getElementById('copyBtn');
                 const originalText = btn.innerHTML;
                 btn.innerHTML = '<span>已复制</span>';
@@ -2185,7 +2196,8 @@
 
         function copyExportContent() {
             const content = document.getElementById('exportContent');
-            navigator.clipboard.writeText(content.value).then(() => {
+            copyTextSafe(content.value).then((ok) => {
+                if (!ok) { showNotification('当前 DBX 沙箱禁止访问剪贴板，请手动复制', 'info'); return; }
                 const btn = document.getElementById('copyExportBtn');
                 const originalText = btn.innerHTML;
                 btn.innerHTML = '<span>已复制</span>';
