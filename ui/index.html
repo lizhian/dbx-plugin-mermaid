@@ -1,0 +1,3285 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mermaid 图表编辑器</title>
+    <link rel="icon"
+        href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='15' fill='%236366f1'/><circle cx='25' cy='30' r='10' fill='white'/><circle cx='75' cy='30' r='10' fill='white'/><circle cx='25' cy='70' r='10' fill='white'/><circle cx='75' cy='70' r='10' fill='white'/><path d='M35 30 L65 30' stroke='white' stroke-width='3' stroke-linecap='round'/><path d='M35 70 L65 70' stroke='white' stroke-width='3' stroke-linecap='round'/><path d='M25 40 L25 60' stroke='white' stroke-width='3' stroke-linecap='round'/><path d='M75 40 L75 60' stroke='white' stroke-width='3' stroke-linecap='round'/><path d='M35 40 L65 60' stroke='white' stroke-width='3' stroke-linecap='round'/><path d='M65 40 L35 60' stroke='white' stroke-width='3' stroke-linecap='round'/></svg>">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jsdiff/5.1.0/diff.min.js"></script>
+    
+    <script>
+        // --- Configuration & Constants ---
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#6366f1',
+                        secondary: '#10b981',
+                        accent: '#8b5cf6',
+                        editor: '#1e293b'
+                    }
+                }
+            }
+        }
+
+        const CONSTANTS = {
+            ZOOM_STEP: 0.1,
+            MIN_ZOOM: 0.3,
+            MAX_ZOOM: 5,
+            DB_NAME: 'MermaidEditorDB',
+            DB_VERSION: 1,
+            STORE_NAME: 'tabs',
+            S3_CONFIG_KEY: 'mermaid_editor_s3_config',
+            LAST_FILE_KEY: 'mermaid_editor_last_file',
+            DEFAULT_MAX_BACKUPS: 10,
+            DEFAULT_IDLE_TIME: 1, // minutes
+            DEFAULT_ENABLE_AUTOSAVE: true
+        };
+
+        // --- Storage Abstraction ---
+        class StorageProvider {
+            constructor(config) {
+                this.config = config;
+            }
+
+            async list(prefix) {
+                throw new Error("Not implemented");
+            }
+
+            async get(key) {
+                throw new Error("Not implemented");
+            }
+
+            async put(key, body) {
+                throw new Error("Not implemented");
+            }
+
+            async delete(key) {
+                throw new Error("Not implemented");
+            }
+
+            async deleteMany(keys) {
+                throw new Error("Not implemented");
+            }
+
+            async copy(source, target) {
+                throw new Error("Not implemented");
+            }
+
+            async head(key) {
+                throw new Error("Not implemented");
+            }
+        }
+
+        class S3StorageProvider extends StorageProvider {
+            constructor(config) {
+                super(config);
+                if (!config || !config.accessKeyId || !config.secretAccessKey) {
+                    this.client = null;
+                    return;
+                }
+                this.client = new AWS.S3({
+                    accessKeyId: config.accessKeyId,
+                    secretAccessKey: config.secretAccessKey,
+                    region: config.region,
+                    endpoint: config.endpoint,
+                    s3ForcePathStyle: true
+                });
+                this.bucket = config.bucket;
+            }
+
+            _checkClient() {
+                if (!this.client) throw new Error("S3 Client not initialized");
+            }
+
+            async list(prefix) {
+                this._checkClient();
+                const params = { Bucket: this.bucket, Prefix: prefix, Delimiter: '/' };
+                return this.client.listObjectsV2(params).promise();
+            }
+
+            async get(key) {
+                this._checkClient();
+                const data = await this.client.getObject({ Bucket: this.bucket, Key: key }).promise();
+                return {
+                    body: data.Body.toString('utf-8'),
+                    lastModified: data.LastModified,
+                    size: data.ContentLength
+                };
+            }
+
+            async put(key, body) {
+                this._checkClient();
+                return this.client.putObject({
+                    Bucket: this.bucket,
+                    Key: key,
+                    Body: body,
+                    ContentType: 'text/markdown'
+                }).promise();
+            }
+
+            async delete(key) {
+                this._checkClient();
+                return this.client.deleteObject({ Bucket: this.bucket, Key: key }).promise();
+            }
+
+            async deleteMany(keys) {
+                this._checkClient();
+                if (!keys || keys.length === 0) return;
+                return this.client.deleteObjects({
+                    Bucket: this.bucket,
+                    Delete: { Objects: keys }
+                }).promise();
+            }
+
+            async copy(sourceKey, targetKey) {
+                this._checkClient();
+                return this.client.copyObject({
+                    Bucket: this.bucket,
+                    CopySource: encodeURIComponent(`${this.bucket}/${sourceKey}`),
+                    Key: targetKey
+                }).promise();
+            }
+
+            async head(key) {
+                this._checkClient();
+                return this.client.headObject({ Bucket: this.bucket, Key: key }).promise();
+            }
+        }
+
+        const remoteStorage = {
+            provider: null,
+            init(config) {
+                if (config) {
+                    this.provider = new S3StorageProvider(config);
+                }
+            },
+            isReady() {
+                return !!this.provider && !!this.provider.client;
+            }
+        };
+
+        const INITIAL_CODE = `flowchart TD
+    A(Christmas) -->|Get money| B(Go shopping)
+    B --> C(Let me think)
+    C -->|One| D(Laptop)
+    C -->|Two| E(iPhone)
+    C -->|Three| F(Car)
+
+    style A fill:#f0f9ff,stroke:#0ea5e9
+    style B fill:#f0fdf4,stroke:#10b981
+    style C fill:#faf5ff,stroke:#8b5cf6
+    style D fill:#fef2f2,stroke:#ef4444
+    style E fill:#fffbeb,stroke:#f59e0b
+    style F fill:#eff6ff,stroke:#3b82f6`;
+
+        // --- State Management ---
+        const state = {
+            tabs: [],
+            activeTabId: null,
+            tabCounter: 0,
+            renderCounter: 0,
+            currentCode: INITIAL_CODE,
+            zoom: {
+                level: 1,
+                translateX: 0,
+                translateY: 0
+            },
+            pan: {
+                isPanning: false,
+                startX: 0,
+                startY: 0,
+                animationFrameId: null
+            },
+            draggedTabId: null,
+            s3Config: null,
+            uiConfig: {
+                copyFormat: 'png',
+                exportFormat: 'png'
+            },
+            currentFile: {
+                type: 'local', // 'local' | 's3'
+                key: null,
+                backupCount: 0
+            },
+            lastSavedContent: '', // For change detection
+            s3BrowserPath: '', // For file browsing
+            isSavingMode: false,
+            autoSaveTimer: null,
+            autoSaveInterval: null,
+            lastInputTime: null,
+            isRenderError: false,
+            lastSaveTime: null
+        };
+
+        let db = null;
+
+
+        function timeAgo(date) {
+            const now = new Date();
+            const diffMs = now - date;
+            const diffSec = Math.floor(diffMs / 1000);
+            const diffMin = Math.floor(diffSec / 60);
+            const diffHour = Math.floor(diffMin / 60);
+            const diffDay = Math.floor(diffHour / 24);
+
+            if (diffSec < 60) {
+                return '刚刚';
+            } else if (diffMin < 60) {
+                return `${diffMin}分钟前`;
+            } else if (diffHour < 24) {
+                return `${diffHour}小时前`;
+            } else {
+                return `${diffDay}天前`;
+            }
+        }
+
+        async function getBackupCount(key) {
+            if (!remoteStorage.isReady()) return 0;
+            const backupPrefix = key.replace('.md', '/');
+            try {
+                const pathParts = key.split('/');
+                const filename = pathParts.pop();
+                const dir = pathParts.join('/');
+                const filenameNoExt = filename.replace('.md', '');
+                const backupDir = (dir ? dir + '/' : '') + '_' + filenameNoExt + '/';
+
+                const data = await remoteStorage.provider.list(backupDir);
+                return data.KeyCount || 0;
+            } catch (e) {
+                console.error('Failed to get backup count', e);
+                return 0;
+            }
+        }
+
+        // --- Database Operations ---
+        function initDB() {
+            return new Promise((resolve, reject) => {
+                const request = indexedDB.open(CONSTANTS.DB_NAME, CONSTANTS.DB_VERSION);
+
+                request.onerror = () => reject(request.error);
+                request.onsuccess = () => {
+                    db = request.result;
+                    resolve(db);
+                };
+
+                request.onupgradeneeded = (event) => {
+                    const database = event.target.result;
+                    if (!database.objectStoreNames.contains(CONSTANTS.STORE_NAME)) {
+                        const store = database.createObjectStore(CONSTANTS.STORE_NAME, { keyPath: 'id' });
+                        store.createIndex('name', 'name', { unique: false });
+                    }
+                };
+            });
+        }
+
+        function saveTabsToDB() {
+            if (!db) return Promise.resolve();
+            return new Promise((resolve, reject) => {
+                const transaction = db.transaction([CONSTANTS.STORE_NAME], 'readwrite');
+                const store = transaction.objectStore(CONSTANTS.STORE_NAME);
+                store.clear();
+                state.tabs.forEach(tab => store.put(tab));
+                transaction.oncomplete = () => resolve();
+                transaction.onerror = () => reject(transaction.error);
+            });
+        }
+
+        function loadTabsFromDB() {
+            if (!db) return Promise.resolve([]);
+            return new Promise((resolve, reject) => {
+                const transaction = db.transaction([CONSTANTS.STORE_NAME], 'readonly');
+                const store = transaction.objectStore(CONSTANTS.STORE_NAME);
+                const request = store.getAll();
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => reject(request.error);
+            });
+        }
+
+        // --- Initialization ---
+        document.addEventListener('DOMContentLoaded', async function () {
+            mermaid.initialize({
+                startOnLoad: false,
+                theme: 'default',
+                flowchart: { useMaxWidth: true, curve: 'basis' },
+                securityLevel: 'loose'
+            });
+
+            await initTabs();
+            initS3();
+            initUIConfig();
+            initResizeDrag();
+            initEditor();
+            bindEvents();
+            initPanZoom();
+            renderMermaid();
+
+            // Auto-load last file if configured
+            await tryAutoLoadLastFile();
+
+            // Setup Auto Save (Idle)
+            if (!state.isAutoSaveSetup) {
+                setupAutoSave();
+                state.isAutoSaveSetup = true;
+            }
+
+            updateFooterUI();
+
+            // Start Save Time Updater
+            setInterval(updateSaveTimeDisplay, 60000);
+        });
+
+        function updateSaveTimeDisplay() {
+            const el = document.getElementById('lastSavedTime');
+            if (!el) return;
+
+            if (!state.lastSaveTime) {
+                el.textContent = '';
+                return;
+            }
+
+            el.textContent = '已保存: ' + timeAgo(state.lastSaveTime);
+        }
+
+        function setupAutoSave() {
+            const editor = document.getElementById('mermaidEditor');
+            const countdownEl = document.getElementById('autoSaveCountdown');
+
+            // Listen for user input
+            editor.addEventListener('input', () => {
+                if (state.s3Config && state.currentFile.type === 's3') {
+                    // Check if auto-save is enabled
+                    if (state.s3Config.enableAutoSave === false) return;
+
+                    state.lastInputTime = Date.now();
+                    const idleMs = (state.s3Config.idleTime || CONSTANTS.DEFAULT_IDLE_TIME) * 60 * 1000;
+
+                    // If user typed, hide countdown (if visible) because time extended
+                    if (!countdownEl.classList.contains('hidden')) {
+                        countdownEl.classList.add('hidden');
+                    }
+
+                    // If interval is not already running, start it
+                    if (!state.autoSaveInterval) {
+                        state.autoSaveInterval = setInterval(() => {
+                            const now = Date.now();
+                            const elapsed = now - state.lastInputTime;
+                            const remaining = idleMs - elapsed;
+
+                            if (remaining <= 0) {
+                                // Time is up: Trigger Save
+                                clearInterval(state.autoSaveInterval);
+                                state.autoSaveInterval = null;
+
+                                countdownEl.classList.add('hidden');
+                                countdownEl.textContent = '';
+
+                                console.log('Auto-save triggered after idle');
+                                handleSave(true); // silent save
+                            } else if (remaining <= 10000) {
+                                // Less than 10 seconds: Show Countdown
+                                countdownEl.textContent = `自动保存 ${Math.ceil(remaining / 1000)}s`;
+                                countdownEl.classList.remove('hidden');
+                            } else {
+                                // More than 10 seconds: Hide
+                                if (!countdownEl.classList.contains('hidden')) {
+                                    countdownEl.classList.add('hidden');
+                                }
+                            }
+                        }, 1000); // Check every second
+                    }
+                }
+            });
+        }
+
+
+        async function tryAutoLoadLastFile() {
+            const lastFileKey = localStorage.getItem(CONSTANTS.LAST_FILE_KEY);
+            if (lastFileKey && state.s3Config) {
+                console.log('Attempting to restore last session:', lastFileKey);
+                // We reuse loadS3File logic but need to be careful about UI feedback during init
+                try {
+                    await loadS3File(lastFileKey, true); // true = silent/init mode
+                } catch (e) {
+                    console.error('Failed to auto-load last file', e);
+                    localStorage.removeItem(CONSTANTS.LAST_FILE_KEY);
+                }
+            }
+        }
+
+        async function initTabs() {
+            try {
+                await initDB();
+                const savedTabs = await loadTabsFromDB();
+
+                if (savedTabs && savedTabs.length > 0) {
+                    state.tabs = savedTabs;
+                    state.tabCounter = Math.max(...state.tabs.map(t => t.id));
+                    state.activeTabId = state.tabs[0].id;
+                } else {
+                    state.tabCounter++;
+                    state.tabs = [{
+                        id: state.tabCounter,
+                        name: '图表 1',
+                        code: state.currentCode
+                    }];
+                    state.activeTabId = state.tabs[0].id;
+                    await saveTabsToDB();
+                }
+                renderTabs();
+            } catch (error) {
+                console.error('初始化标签失败:', error);
+                // Fallback
+                state.tabCounter++;
+                state.tabs = [{
+                    id: state.tabCounter,
+                    name: '图表 1',
+                    code: state.currentCode
+                }];
+                state.activeTabId = state.tabs[0].id;
+                renderTabs();
+            }
+        }
+
+        // --- UI Config ---
+        function initUIConfig() {
+            const savedConfig = localStorage.getItem(CONSTANTS.UI_CONFIG_KEY);
+            if (savedConfig) {
+                try {
+                    state.uiConfig = { ...state.uiConfig, ...JSON.parse(savedConfig) };
+                } catch (e) {
+                    console.error("Failed to parse UI config", e);
+                }
+            }
+        }
+
+        function saveUIConfig() {
+            localStorage.setItem(CONSTANTS.UI_CONFIG_KEY, JSON.stringify(state.uiConfig));
+        }
+
+        // --- S3 System ---
+        function initS3() {
+            const savedConfig = localStorage.getItem(CONSTANTS.S3_CONFIG_KEY);
+            if (savedConfig) {
+                state.s3Config = JSON.parse(savedConfig);
+                updateS3Client();
+            }
+        }
+
+        function updateS3Client() {
+            if (!state.s3Config) return;
+            remoteStorage.init(state.s3Config);
+        }
+
+        async function saveS3Config() {
+            // UI Config
+            state.uiConfig.copyFormat = document.getElementById('uiCopyFormat').value;
+            state.uiConfig.exportFormat = document.getElementById('uiExportFormat').value;
+            saveUIConfig();
+
+            // Update button label dynamically if needed, or just rely on click handler reading state
+
+            // S3 Config
+            const endpoint = document.getElementById('s3Endpoint').value.trim();
+            const region = document.getElementById('s3Region').value.trim();
+            const accessKeyId = document.getElementById('s3AccessKey').value.trim();
+            const secretAccessKey = document.getElementById('s3SecretKey').value.trim();
+            const bucket = document.getElementById('s3Bucket').value.trim();
+            const maxBackups = parseInt(document.getElementById('s3MaxBackups').value.trim()) || CONSTANTS.DEFAULT_MAX_BACKUPS;
+            const enableAutoSave = document.getElementById('s3EnableAutoSave').checked;
+            const idleTime = parseInt(document.getElementById('s3IdleTime').value.trim()) || CONSTANTS.DEFAULT_IDLE_TIME;
+
+            if (!accessKeyId || !secretAccessKey || !bucket) {
+                showNotification('请填写必填项 (Access Key, Secret Key, Bucket)', 'error');
+                return;
+            }
+
+            // Prefix removed, default to empty
+            state.s3Config = {
+                endpoint,
+                region,
+                accessKeyId,
+                secretAccessKey,
+                bucket,
+                prefix: '',
+                maxBackups,
+                enableAutoSave,
+                idleTime
+            };
+            localStorage.setItem(CONSTANTS.S3_CONFIG_KEY, JSON.stringify(state.s3Config));
+            updateS3Client();
+
+            closeS3ConfigModal();
+            showNotification('S3 配置已保存', 'success');
+
+            // setupAutoSave(); // No need to re-init, listener is dynamic
+        }
+
+        // --- S3 UI Handlers ---
+        function openS3ConfigModal() {
+            const modal = document.getElementById('s3ConfigModal');
+            document.querySelector('#s3ConfigModal h3').textContent = '设置'; // Rename Title
+
+            // Load UI Config
+            document.getElementById('uiCopyFormat').value = state.uiConfig.copyFormat || 'png';
+            document.getElementById('uiExportFormat').value = state.uiConfig.exportFormat || 'png';
+
+            if (state.s3Config) {
+                document.getElementById('s3Endpoint').value = state.s3Config.endpoint || '';
+                document.getElementById('s3Region').value = state.s3Config.region || '';
+                document.getElementById('s3AccessKey').value = state.s3Config.accessKeyId || '';
+                document.getElementById('s3SecretKey').value = state.s3Config.secretAccessKey || '';
+                document.getElementById('s3Bucket').value = state.s3Config.bucket || '';
+                document.getElementById('s3MaxBackups').value = state.s3Config.maxBackups || CONSTANTS.DEFAULT_MAX_BACKUPS;
+
+                const enableAutoSave = state.s3Config.enableAutoSave !== undefined ? state.s3Config.enableAutoSave : CONSTANTS.DEFAULT_ENABLE_AUTOSAVE;
+                document.getElementById('s3EnableAutoSave').checked = enableAutoSave;
+                document.getElementById('s3IdleTime').value = state.s3Config.idleTime || CONSTANTS.DEFAULT_IDLE_TIME;
+
+                toggleIdleTimeInput(enableAutoSave);
+            } else {
+                document.getElementById('s3MaxBackups').value = CONSTANTS.DEFAULT_MAX_BACKUPS;
+                document.getElementById('s3EnableAutoSave').checked = CONSTANTS.DEFAULT_ENABLE_AUTOSAVE;
+                document.getElementById('s3IdleTime').value = CONSTANTS.DEFAULT_IDLE_TIME;
+                toggleIdleTimeInput(CONSTANTS.DEFAULT_ENABLE_AUTOSAVE);
+            }
+            modal.classList.remove('hidden');
+        }
+
+        function toggleIdleTimeInput(show) {
+            const container = document.getElementById('s3IdleTimeContainer');
+            if (show) {
+                container.classList.remove('hidden');
+            } else {
+                container.classList.add('hidden');
+            }
+        }
+
+        async function listS3Files(path = null) {
+            if (!remoteStorage.isReady()) {
+                openS3ConfigModal();
+                showNotification('请先配置远程存储', 'info');
+                return;
+            }
+
+            let currentPath = path !== null ? path : state.s3BrowserPath;
+            if (currentPath && !currentPath.endsWith('/')) currentPath += '/';
+            state.s3BrowserPath = currentPath || '';
+
+            const listContainer = document.getElementById('s3FileList');
+            const breadcrumbs = document.getElementById('s3Breadcrumbs');
+
+            listContainer.innerHTML = '<div class="text-center text-gray-500 py-4"><i class="fas fa-spinner fa-spin mr-2"></i>加载中...</div>';
+            if (breadcrumbs) breadcrumbs.innerHTML = renderBreadcrumbs(state.s3BrowserPath);
+
+            document.getElementById('s3ListModal').classList.remove('hidden');
+
+            // Add Save Button if saving mode
+            let saveAction = document.getElementById('s3BrowserSaveAction');
+            if (!saveAction) {
+                saveAction = document.createElement('div');
+                saveAction.id = 's3BrowserSaveAction';
+                saveAction.className = 'px-4 py-3 border-t border-gray-200 bg-gray-50 flex items-center justify-between hidden';
+                saveAction.innerHTML = `
+                    <div class="flex-1 mr-3">
+                        <input id="s3SaveFilename" type="text" placeholder="输入文件名 (如: my-chart.md)"
+                            class="w-full border border-gray-300 rounded px-3 py-1.5 text-xs focus:ring-1 focus:ring-primary focus:border-transparent">
+                    </div>
+                    <button id="s3ConfirmSaveBtn" class="flex items-center space-x-1 bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded text-xs font-medium transition">
+                        <i class="fas fa-check"></i>
+                        <span>确认保存</span>
+                    </button>
+                `;
+                document.getElementById('s3ListModal').querySelector('.bg-white').appendChild(saveAction);
+
+                document.getElementById('s3ConfirmSaveBtn').addEventListener('click', confirmS3Save);
+            }
+
+            if (state.isSavingMode) {
+                saveAction.classList.remove('hidden');
+                document.getElementById('s3SaveFilename').focus();
+            } else {
+                saveAction.classList.add('hidden');
+            }
+
+            try {
+                const data = await remoteStorage.provider.list(state.s3BrowserPath);
+                await renderS3Browser(data.CommonPrefixes || [], data.Contents || []);
+            } catch (err) {
+                console.error('List Error:', err);
+                listContainer.innerHTML = `<div class="text-center text-red-500 py-4">加载失败: ${err.message}</div>`;
+            }
+        }
+
+        function renderBreadcrumbs(path) {
+            const parts = path.split('/').filter(p => p);
+            let html = `<span class="cursor-pointer hover:text-primary hover:underline" onclick="listS3Files('')">根目录</span>`;
+            let current = '';
+
+            parts.forEach((part, index) => {
+                current += part + '/';
+                html += ` <span class="text-gray-400">/</span> <span class="cursor-pointer hover:text-primary hover:underline" onclick="listS3Files('${current}')">${part}</span>`;
+            });
+
+            return html;
+        }
+
+        async function renderS3Browser(folders, files) {
+            const listContainer = document.getElementById('s3FileList');
+            listContainer.innerHTML = '';
+
+            // Render Folders (Filter out backup folders starting with _)
+            folders.forEach(folder => {
+                const name = folder.Prefix.replace(state.s3BrowserPath, '').replace('/', '');
+                if (!name || name.startsWith('_')) return; // Skip if empty or backup folder
+
+                const item = document.createElement('div');
+                item.className = 'flex items-center justify-between p-3 hover:bg-gray-50 border-b border-gray-100 last:border-0 group';
+                item.innerHTML = `
+                    <div class="flex items-center space-x-3 cursor-pointer flex-1" onclick="listS3Files('${folder.Prefix}')">
+                        <i class="fas fa-folder text-yellow-400 text-lg"></i>
+                        <span class="text-sm font-medium text-gray-700">${name}</span>
+                    </div>
+                    <div class="hidden group-hover:flex items-center space-x-2">
+                        <button class="text-gray-400 hover:text-blue-600 px-2" title="重命名" onclick="renameS3Item('${folder.Prefix}', true)">
+                            <i class="fas fa-edit"></i>
+                        </button>
+                        <button class="text-gray-400 hover:text-red-600 px-2" title="删除" onclick="deleteS3Item('${folder.Prefix}', true)">
+                            <i class="fas fa-trash-alt"></i>
+                        </button>
+                    </div>
+                `;
+                listContainer.appendChild(item);
+            });
+
+            // Render Files
+            const mdFiles = files.filter(f => f.Key.endsWith('.md') && f.Key !== state.s3BrowserPath).filter(f => {
+                const filename = f.Key.replace(state.s3BrowserPath, '');
+                return !/^\d{8}-\d{6}\.md$/.test(filename);
+            }).sort((a, b) => b.LastModified - a.LastModified);
+
+            for (const file of mdFiles) {
+                const name = file.Key.replace(state.s3BrowserPath, '');
+                const date = new Date(file.LastModified).toLocaleString();
+                const size = (file.Size / 1024).toFixed(1) + ' KB';
+
+                const item = document.createElement('div');
+                item.className = 'flex items-center justify-between p-3 hover:bg-gray-50 border-b border-gray-100 last:border-0 group';
+
+                item.innerHTML = `
+                    <div class="flex items-center space-x-3 cursor-pointer flex-1 overflow-hidden" onclick="loadS3File('${file.Key}')">
+                        <i class="fas fa-file-alt text-gray-400 text-lg"></i>
+                        <div class="flex flex-col overflow-hidden">
+                            <span class="text-sm font-medium text-gray-700 truncate" title="${name}">${name}</span>
+                            <div class="flex items-center space-x-2 text-xs text-gray-400">
+                                <span>${date}</span>
+                                <span>·</span>
+                                <span>${size}</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="hidden group-hover:flex items-center space-x-2">
+                         <button class="text-gray-400 hover:text-blue-600 px-2" title="重命名" onclick="renameS3Item('${file.Key}', false)">
+                            <i class="fas fa-edit"></i>
+                        </button>
+                        <button class="text-gray-400 hover:text-red-600 px-2" title="删除" onclick="deleteS3Item('${file.Key}', false)">
+                            <i class="fas fa-trash-alt"></i>
+                        </button>
+                        <button class="text-primary hover:text-indigo-700 px-2 py-1 rounded text-xs font-medium" onclick="loadS3File('${file.Key}')">
+                            加载
+                        </button>
+                    </div>
+                `;
+                listContainer.appendChild(item);
+            }
+
+            if (folders.length === 0 && mdFiles.length === 0) {
+                listContainer.innerHTML += '<div class="text-center text-gray-400 py-8">此文件夹为空</div>';
+            }
+        }
+
+        async function createS3Folder() {
+            const name = await showPrompt("请输入文件夹名称:");
+            if (!name) return;
+            const folderKey = (state.s3BrowserPath || '') + name + '/';
+            try {
+                await remoteStorage.provider.put(folderKey, '');
+                listS3Files(state.s3BrowserPath);
+            } catch (err) {
+                showNotification('创建文件夹失败: ' + err.message, 'error');
+            }
+        }
+
+        async function renameS3Item(oldKey, isFolder) {
+            const oldName = oldKey.replace(state.s3BrowserPath, '').replace('/', '');
+            const newName = await showPrompt(`重命名 ${isFolder ? '文件夹' : '文件'}:`, oldName);
+            if (!newName || newName === oldName) return;
+
+            let newKey = state.s3BrowserPath + newName;
+            if (isFolder && !newKey.endsWith('/')) newKey += '/';
+
+            try {
+                // 1. Rename Main Item
+                await remoteStorage.provider.copy(oldKey, newKey);
+                await remoteStorage.provider.delete(oldKey);
+
+                // 2. Rename Backup Folder (If File)
+                if (!isFolder && oldKey.endsWith('.md')) {
+                    const oldPathParts = oldKey.split('/');
+                    const oldFilename = oldPathParts.pop();
+                    const oldDir = oldPathParts.join('/');
+                    const oldFilenameNoExt = oldFilename.replace('.md', '');
+                    const oldBackupDir = (oldDir ? oldDir + '/' : '') + '_' + oldFilenameNoExt + '/';
+
+                    const newPathParts = newKey.split('/');
+                    const newFilename = newPathParts.pop();
+                    const newDir = newPathParts.join('/');
+                    const newFilenameNoExt = newFilename.replace('.md', '');
+                    const newBackupDir = (newDir ? newDir + '/' : '') + '_' + newFilenameNoExt + '/';
+
+                    const backupList = await remoteStorage.provider.list(oldBackupDir);
+                    if (backupList.Contents && backupList.Contents.length > 0) {
+                        // Copy all backups
+                        const copyPromises = backupList.Contents.map(file => {
+                            const fileName = file.Key.split('/').pop();
+                            const newBackupKey = newBackupDir + fileName;
+                            return remoteStorage.provider.copy(file.Key, newBackupKey);
+                        });
+                        await Promise.all(copyPromises);
+
+                        // Delete all old backups
+                        const objectsToDelete = backupList.Contents.map(f => ({ Key: f.Key }));
+                        await remoteStorage.provider.deleteMany(objectsToDelete);
+                    }
+                }
+
+                if (isFolder) {
+                    showNotification('注意: 仅重命名了文件夹本身，其中的文件未移动 (S3 限制)', 'warning');
+                }
+
+                listS3Files(state.s3BrowserPath);
+                showNotification('重命名成功', 'success');
+            } catch (err) {
+                showNotification('重命名失败: ' + err.message, 'error');
+            }
+        }
+
+        async function deleteS3Item(key, isFolder) {
+            if (!await showConfirm(`确定要删除 ${isFolder ? '文件夹' : '文件'} "${key}" 吗?`, {
+                title: '删除确认',
+                danger: true
+            })) return;
+            try {
+                const objectsToDelete = [{ Key: key }];
+
+                if (!isFolder && key.endsWith('.md')) {
+                    // Calculate backup directory
+                    const pathParts = key.split('/');
+                    const filename = pathParts.pop();
+                    const dir = pathParts.join('/');
+                    const filenameNoExt = filename.replace('.md', '');
+                    const backupDir = (dir ? dir + '/' : '') + '_' + filenameNoExt + '/';
+
+                    const backupList = await remoteStorage.provider.list(backupDir);
+                    if (backupList.Contents) {
+                        backupList.Contents.forEach(c => objectsToDelete.push({ Key: c.Key }));
+                    }
+                }
+
+                if (objectsToDelete.length > 0) {
+                    await remoteStorage.provider.deleteMany(objectsToDelete);
+                }
+
+                listS3Files(state.s3BrowserPath);
+                showNotification('删除成功', 'success');
+            } catch (err) {
+                showNotification('删除失败: ' + err.message, 'error');
+            }
+        }
+
+        function generateMarkdown() {
+            let markdown = '';
+            state.tabs.forEach(tab => {
+                markdown += `### ${tab.name}\n\`\`\`mermaid\n${tab.code}\n\`\`\`\n\n`;
+            });
+            return markdown;
+        }
+
+        async function loadS3File(key, isInit = false) {
+            try {
+                const data = await remoteStorage.provider.get(key);
+
+                const content = data.body;
+
+                state.currentFile = { type: 's3', key: key, backupCount: 0 };
+                state.tabs = [];
+                state.tabCounter = 0;
+
+                document.getElementById('importContent').value = content;
+                await importMarkdown(true, isInit || state.currentFile.type === 's3');
+
+                // Set baseline for change detection
+                state.lastSavedContent = generateMarkdown();
+                state.lastSaveTime = data.lastModified ? new Date(data.lastModified) : new Date();
+                updateSaveTimeDisplay();
+
+                // Persist last file key
+                localStorage.setItem(CONSTANTS.LAST_FILE_KEY, key);
+
+                // Fetch backup count in background
+                getBackupCount(key).then(count => {
+                    state.currentFile.backupCount = count;
+                    updateFooterUI();
+                });
+
+                if (!isInit) {
+                    closeS3ListModal();
+                    updateFooterUI();
+                    showNotification('文件已加载: ' + key, 'success');
+                }
+            } catch (err) {
+                console.error('Remote Load Error:', err);
+                if (!isInit) showNotification('加载失败: ' + err.message, 'error');
+                throw err; // Re-throw for auto-load catcher
+            }
+        }
+
+
+        async function pruneBackups(backupDir) {
+            const maxBackups = state.s3Config.maxBackups || CONSTANTS.DEFAULT_MAX_BACKUPS;
+
+            try {
+                const data = await remoteStorage.provider.list(backupDir);
+
+                if (!data.Contents || data.Contents.length <= maxBackups) return;
+
+                // Sort oldest first
+                const backups = data.Contents.sort((a, b) => a.LastModified - b.LastModified);
+
+                const toDeleteCount = backups.length - maxBackups;
+                const objectsToDelete = backups.slice(0, toDeleteCount).map(f => ({ Key: f.Key }));
+
+                if (objectsToDelete.length > 0) {
+                    console.log(`Pruning ${objectsToDelete.length} old backups...`);
+                    await remoteStorage.provider.deleteMany(objectsToDelete);
+                }
+            } catch (err) {
+                console.error('Pruning backups failed', err);
+            }
+        }
+
+        async function handleSave(silent = false) {
+            if (!remoteStorage.isReady()) {
+                openS3ConfigModal();
+                showNotification('请先配置远程存储', 'info');
+                return;
+            }
+
+            let markdown = generateMarkdown();
+
+            // Change Detection (Skip if identical)
+            if (state.currentFile.type === 's3' && markdown === state.lastSavedContent) {
+                if (!silent) showNotification('内容未修改，无需保存', 'info');
+                return;
+            }
+
+            let targetKey = state.currentFile.key;
+
+            if (state.currentFile.type === 'local' || !targetKey) {
+                // Open file browser for selection (save mode)
+                state.isSavingMode = true;
+                listS3Files();
+                showNotification('请选择保存目录', 'info');
+                return;
+            }
+
+            const btn = document.getElementById('footerSaveBtn');
+            const originalHTML = btn.innerHTML;
+            if (!silent) {
+                btn.disabled = true;
+                btn.innerHTML = `<i class="fas fa-spinner fa-spin"></i><span>保存中...</span>`;
+            }
+
+            try {
+                // Clear any auto-save interval on successful save
+                if (state.autoSaveInterval) {
+                    clearInterval(state.autoSaveInterval);
+                    state.autoSaveInterval = null;
+                }
+                const countdownEl = document.getElementById('autoSaveCountdown');
+                if (countdownEl) {
+                    countdownEl.classList.add('hidden');
+                    countdownEl.textContent = '';
+                }
+
+                await remoteStorage.provider.put(targetKey, markdown);
+
+                const now = new Date();
+                const timestamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}${String(now.getSeconds()).padStart(2, '0')}`;
+
+                // Get filename from key
+                const pathParts = targetKey.split('/');
+                const filename = pathParts.pop();
+                const dir = pathParts.join('/');
+                const filenameNoExt = filename.replace('.md', '');
+
+                // Construct backup key: dir/_filenameNoExt/timestamp.md
+                const backupDir = (dir ? dir + '/' : '') + '_' + filenameNoExt + '/';
+                const backupKey = `${backupDir}/${timestamp}.md`;
+
+                await remoteStorage.provider.put(backupKey, markdown);
+
+                if (!silent) showNotification('保存成功 (已备份)', 'success');
+
+                // Update baseline
+                state.lastSavedContent = markdown;
+                state.lastSaveTime = new Date();
+                updateSaveTimeDisplay();
+
+                // Prune old backups (fire and forget)
+                pruneBackups(backupDir).then(() => {
+                    // Update backup count UI after pruning
+                    getBackupCount(targetKey).then(count => {
+                        if (state.currentFile.key === targetKey) {
+                            state.currentFile.backupCount = count;
+                            updateFooterUI();
+                        }
+                    });
+                });
+
+            } catch (err) {
+                console.error('Save Error:', err);
+                if (!silent) showNotification('保存失败: ' + err.message, 'error');
+            } finally {
+                if (!silent) {
+                    btn.disabled = false;
+                    btn.innerHTML = originalHTML;
+                }
+            }
+        }
+
+        async function handleNewFile() {
+            if (await showConfirm('新建文件将清空当前工作区，确定继续吗？', { title: '新建文件', danger: true })) {
+                state.tabs = [];
+                state.tabCounter = 0;
+                state.activeTabId = null;
+                state.currentFile = { type: 'local', key: null, backupCount: 0 };
+                state.lastSavedContent = '';
+                state.lastSaveTime = null;
+                updateSaveTimeDisplay();
+                localStorage.removeItem(CONSTANTS.LAST_FILE_KEY);
+
+                await addNewTab();
+                updateFooterUI();
+                showNotification('已新建文件 (本地)', 'success');
+            }
+        }
+
+        function updateFooterUI() {
+            const statusEl = document.getElementById('fileStatusDisplay');
+            const saveBtn = document.getElementById('footerSaveBtn');
+            const newBtn = document.getElementById('footerNewBtn');
+            const icon = statusEl.querySelector('i');
+            const text = statusEl.querySelector('span');
+
+            if (state.currentFile.type === 'local') {
+                icon.className = 'fas fa-hdd text-gray-500';
+                text.textContent = '本地存储 (未同步)';
+                text.className = 'font-mono text-gray-500';
+                saveBtn.classList.remove('hidden');
+                newBtn.classList.add('hidden');
+                saveBtn.querySelector('span').textContent = '保存到云端';
+            } else {
+                let displayName = state.currentFile.key;
+
+                icon.className = 'fas fa-cloud text-green-600';
+                text.textContent = displayName;
+                text.className = 'font-mono text-green-700 font-medium';
+                saveBtn.classList.remove('hidden');
+                saveBtn.querySelector('span').textContent = '保存';
+                newBtn.classList.remove('hidden');
+            }
+
+            // Add Revert Button if in S3 mode (only once)
+            let revertBtn = document.getElementById('footerRevertBtn');
+            if (!revertBtn) {
+                revertBtn = document.createElement('button');
+                revertBtn.id = 'footerRevertBtn';
+                revertBtn.className = 'hidden flex items-center space-x-1 text-gray-600 hover:text-orange-600 px-2 py-1 rounded hover:bg-gray-100 transition';
+                revertBtn.title = '版本回退';
+                revertBtn.innerHTML = '<i class="fas fa-history"></i><span>回退</span>';
+                revertBtn.onclick = showVersionHistory;
+                document.getElementById('footerSaveBtn').parentNode.insertBefore(revertBtn, document.getElementById('footerSaveBtn'));
+            }
+
+            if (state.currentFile.type === 's3') {
+                revertBtn.classList.remove('hidden');
+                const count = state.currentFile.backupCount || 0;
+                revertBtn.innerHTML = `<i class="fas fa-history"></i><span>回退 (${count})</span>`;
+            } else {
+                revertBtn.classList.add('hidden');
+            }
+        }
+
+        async function showVersionHistory() {
+            if (!state.currentFile.key) return;
+            if (!remoteStorage.isReady()) {
+                showNotification('远程存储未连接', 'error');
+                return;
+            }
+
+            const targetKey = state.currentFile.key;
+            // Get backup folder: dir/_filename/
+            const pathParts = targetKey.split('/');
+            const filename = pathParts.pop();
+            const dir = pathParts.join('/');
+            const filenameNoExt = filename.replace('.md', '');
+            const backupDir = (dir ? dir + '/' : '') + '_' + filenameNoExt + '/';
+
+            const listContainer = document.getElementById('s3FileList');
+            // Reuse S3 modal but change title
+            document.querySelector('#s3ListModal h3').textContent = '版本历史';
+            document.getElementById('s3Breadcrumbs').textContent = '历史备份: ' + filename;
+
+            // Hide create folder button for history view
+            const createBtn = document.querySelector('#s3ListModal .fa-folder-plus').parentNode;
+            createBtn.classList.add('hidden');
+
+            // Add custom close handler to restore UI when closed
+            const closeBtn = document.getElementById('closeS3ListModal');
+            const originalClose = closeBtn.onclick; // This might be bound via addEventListener, better to remove and add
+            // But we have global listener. We can just add a "once" listener to reset UI
+
+            // Or simpler: We just use listS3Files logic but specialized render
+
+            listContainer.innerHTML = '<div class="text-center text-gray-500 py-4"><i class="fas fa-spinner fa-spin mr-2"></i>加载备份列表...</div>';
+            document.getElementById('s3ListModal').classList.remove('hidden');
+
+            try {
+                const data = await remoteStorage.provider.list(backupDir);
+
+                if (!data.Contents || data.Contents.length === 0) {
+                    listContainer.innerHTML = '<div class="text-center text-gray-500 py-8">暂无备份记录</div>';
+                } else {
+                    listContainer.innerHTML = '';
+                    // Sort newest first
+                    const backups = data.Contents.sort((a, b) => b.LastModified - a.LastModified);
+
+                    backups.forEach(file => {
+                        const dateObj = new Date(file.LastModified);
+                        const timeStr = timeAgo(dateObj);
+                        const fullDate = dateObj.toLocaleString();
+                        const size = (file.Size / 1024).toFixed(1) + ' KB';
+                        const filename = file.Key.split('/').pop();
+
+                        const item = document.createElement('div');
+                        item.className = 'flex items-center justify-between p-3 hover:bg-gray-50 border-b border-gray-100 last:border-0 group';
+                        item.innerHTML = `
+                            <div class="flex items-center space-x-3 flex-1">
+                                <i class="fas fa-clock text-gray-400 text-lg"></i>
+                                <div class="flex flex-col flex-1">
+                                    <div class="flex items-center justify-between">
+                                         <span class="text-sm font-medium text-gray-700">${filename}</span>
+                                    </div>
+                                    <div class="flex items-center space-x-2 text-xs text-gray-400 mt-0.5">
+                                        <span title="${fullDate}">${fullDate}</span>
+                                        <span>·</span>
+                                        <span>${size}</span>
+                                        <span class="font-medium text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded" title="${fullDate}">${timeStr}</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="flex items-center space-x-2 ml-2">
+                                <button class="text-blue-600 hover:text-blue-800 text-xs px-2 py-1 border border-blue-200 rounded hover:bg-blue-50" onclick="diffVersion('${file.Key}')">
+                                    对比
+                                </button>
+                                <button class="text-red-600 hover:text-red-800 text-xs px-2 py-1 border border-red-200 rounded hover:bg-red-50" onclick="restoreVersion('${file.Key}')">
+                                    回退
+                                </button>
+                            </div>
+                        `;
+                        listContainer.appendChild(item);
+                    });
+                }
+
+                // Cleanup when closing specific to history view
+                const resetUI = () => {
+                    document.querySelector('#s3ListModal h3').textContent = '云端文件列表';
+                    createBtn.classList.remove('hidden');
+                    closeBtn.removeEventListener('click', resetUI);
+                };
+                closeBtn.addEventListener('click', resetUI);
+
+            } catch (err) {
+                listContainer.innerHTML = `<div class="text-center text-red-500 py-4">加载失败: ${err.message}</div>`;
+            }
+        }
+
+        async function restoreVersion(backupKey) {
+            if (!await showConfirm('确定要回退到此版本吗？当前内容将自动备份。', { title: '回退确认' })) return;
+
+            try {
+                // 1. Get backup content
+                const data = await remoteStorage.provider.get(backupKey);
+                const content = data.body;
+
+                // 2. Perform a "save" of CURRENT content to backup first
+                await handleSave(true);
+
+                // 3. Overwrite Main with selected backup content
+                await remoteStorage.provider.put(state.currentFile.key, content);
+
+                // 4. Load content into editor
+                state.tabs = [];
+                state.tabCounter = 0;
+                document.getElementById('importContent').value = content;
+                await importMarkdown(true); // Override import
+
+                // Close modal
+                document.getElementById('closeS3ListModal').click();
+                showNotification('版本回退成功', 'success');
+
+            } catch (err) {
+                showNotification('回退失败: ' + err.message, 'error');
+            }
+        }
+
+        async function diffVersion(backupKey) {
+            try {
+                const data = await remoteStorage.provider.get(backupKey);
+                const backupContent = data.body;
+
+                // Generate current markdown
+                let currentContent = '';
+                state.tabs.forEach(tab => {
+                    currentContent += `### ${tab.name}\n\`\`\`mermaid\n${tab.code}\n\`\`\`\n\n`;
+                });
+
+                // Open Diff Modal
+                const diffModal = document.getElementById('diffModal');
+                diffModal.classList.remove('hidden');
+
+                // Init sync scroll
+                const leftContainer = document.getElementById('diffLeft');
+                const rightContainer = document.getElementById('diffRight');
+
+                let activeSide = null;
+
+                // Track active side to prevent scroll loop (flickering)
+                const setActive = (side) => {
+                    activeSide = side;
+                };
+
+                ['mouseenter', 'touchstart'].forEach(evt => {
+                    leftContainer.addEventListener(evt, () => setActive('left'));
+                    rightContainer.addEventListener(evt, () => setActive('right'));
+                });
+
+                leftContainer.onscroll = function () {
+                    if (!activeSide) activeSide = 'left';
+                    if (activeSide === 'left') {
+                        rightContainer.scrollTop = this.scrollTop;
+                    }
+                };
+
+                rightContainer.onscroll = function () {
+                    if (!activeSide) activeSide = 'right';
+                    if (activeSide === 'right') {
+                        leftContainer.scrollTop = this.scrollTop;
+                    }
+                };
+
+                // Bind checkbox
+                const checkBox = document.getElementById('diffOnlyCheck');
+                checkBox.checked = true; // Default checked
+                checkBox.onchange = () => renderDiff(backupContent, currentContent, checkBox.checked);
+
+                // Initial Render
+                renderDiff(backupContent, currentContent, true);
+
+            } catch (err) {
+                showNotification('对比加载失败: ' + err.message, 'error');
+            }
+        }
+
+        function renderDiff(oldText, newText, diffOnly) {
+            const diff = Diff.diffLines(oldText, newText);
+            const leftContainer = document.getElementById('diffLeft');
+            const rightContainer = document.getElementById('diffRight');
+
+            leftContainer.innerHTML = '';
+            rightContainer.innerHTML = '';
+
+            let leftLineNum = 1;
+            let rightLineNum = 1;
+
+            diff.forEach(part => {
+                // If diffOnly is checked, skip parts that are NOT added AND NOT removed (i.e. common parts)
+                // BUT we still need to track line numbers for hidden parts!
+                if (diffOnly && !part.added && !part.removed) {
+                    const lineCount = part.value.replace(/\n$/, '').split('\n').length;
+                    leftLineNum += lineCount;
+                    rightLineNum += lineCount;
+                    return;
+                }
+
+                const lines = part.value.replace(/\n$/, '').split('\n');
+
+                lines.forEach(line => {
+                    const row = document.createElement('div');
+                    row.className = 'flex';
+
+                    const leftRow = document.createElement('div');
+                    leftRow.className = 'flex w-full';
+
+                    const rightRow = document.createElement('div');
+                    rightRow.className = 'flex w-full';
+
+                    // Helper to create line number
+                    const createLineNum = (num, type) => {
+                        const span = document.createElement('span');
+                        span.className = `w-8 flex-shrink-0 text-right pr-2 select-none text-[10px] leading-5 ${type === 'removed' ? 'text-red-400 bg-red-50' :
+                            type === 'added' ? 'text-green-400 bg-green-50' :
+                                'text-gray-300 bg-gray-50 border-r border-gray-100'
+                            }`;
+                        span.textContent = num || '';
+                        return span;
+                    };
+
+                    // Helper to create content
+                    const createContent = (text, type) => {
+                        const div = document.createElement('div');
+                        div.className = `flex-1 whitespace-pre-wrap break-all px-2 leading-5 min-h-[1.25rem] font-mono ${type === 'removed' ? 'bg-red-100 text-red-900' :
+                            type === 'added' ? 'bg-green-100 text-green-900' :
+                                'text-gray-600'
+                            }`;
+                        div.textContent = text;
+                        return div;
+                    };
+
+                    const createEmpty = (type) => {
+                        const div = document.createElement('div');
+                        div.className = `flex-1 relative min-h-[1.25rem] ${type === 'added' ? 'bg-gray-50/30' : 'bg-gray-50/30'}`;
+                        div.innerHTML = '<div class="absolute inset-0 opacity-10 bg-[repeating-linear-gradient(45deg,#000,#000_1px,transparent_1px,transparent_4px)]"></div>';
+                        return div;
+                    }
+
+                    if (part.removed) {
+                        // Removed: Left has content, Right is empty
+                        leftRow.appendChild(createLineNum(leftLineNum++, 'removed'));
+                        leftRow.appendChild(createContent(line, 'removed'));
+
+                        rightRow.appendChild(createLineNum('', 'empty'));
+                        rightRow.appendChild(createEmpty('removed'));
+                    } else if (part.added) {
+                        // Added: Left is empty, Right has content
+                        leftRow.appendChild(createLineNum('', 'empty'));
+                        leftRow.appendChild(createEmpty('added'));
+
+                        rightRow.appendChild(createLineNum(rightLineNum++, 'added'));
+                        rightRow.appendChild(createContent(line, 'added'));
+                    } else {
+                        // Common
+                        leftRow.appendChild(createLineNum(leftLineNum++, 'common'));
+                        leftRow.appendChild(createContent(line, 'common'));
+
+                        rightRow.appendChild(createLineNum(rightLineNum++, 'common'));
+                        rightRow.appendChild(createContent(line, 'common'));
+                    }
+
+                    leftContainer.appendChild(leftRow);
+                    rightContainer.appendChild(rightRow);
+                });
+            });
+
+            if (leftContainer.children.length === 0) {
+                leftContainer.innerHTML = '<div class="text-center text-gray-400 py-4">无差异</div>';
+                rightContainer.innerHTML = '<div class="text-center text-gray-400 py-4">无差异</div>';
+            }
+        }
+
+        function closeDiffModal() {
+            document.getElementById('diffModal').classList.add('hidden');
+        }
+
+        // --- Tab Management ---
+        function renderTabs() {
+            const container = document.getElementById('tabsContainer');
+            container.innerHTML = '';
+
+            state.tabs.forEach(tab => {
+                const tabEl = document.createElement('div');
+                const isActive = tab.id === state.activeTabId;
+
+                tabEl.className = `flex items-center space-x-1 px-3 py-1.5 rounded cursor-pointer transition text-xs select-none ${isActive
+                    ? 'bg-white text-primary border-t border-b border-l border-r border-gray-200'
+                    : 'text-gray-600 hover:text-gray-800 hover:bg-gray-200'
+                    }`;
+
+                tabEl.dataset.tabId = tab.id;
+                tabEl.draggable = true;
+
+                // Drag Events
+                tabEl.ondragstart = (e) => handleTabDragStart(e, tab.id, tabEl);
+                tabEl.ondragend = () => handleTabDragEnd(tabEl);
+                tabEl.ondragover = handleTabDragOver;
+                tabEl.ondrop = (e) => handleTabDrop(e, tab.id);
+                tabEl.onclick = () => switchTab(tab.id);
+
+                // Tab Name
+                const nameSpan = document.createElement('span');
+                nameSpan.textContent = tab.name;
+                nameSpan.className = 'max-w-28 truncate cursor-text';
+                nameSpan.title = '双击重命名';
+                nameSpan.ondblclick = (e) => {
+                    e.stopPropagation();
+
+                    const input = document.createElement('input');
+                    input.type = 'text';
+                    input.value = tab.name;
+                    input.className = 'w-24 bg-transparent border-none outline-none text-xs font-medium p-0 leading-none text-gray-800';
+
+                    const finish = async () => {
+                        const newName = input.value.trim();
+                        if (newName && newName !== tab.name) {
+                            tab.name = newName;
+                            await saveTabsToDB();
+                        }
+                        renderTabs();
+                    };
+
+                    input.onclick = (ev) => ev.stopPropagation();
+                    input.ondblclick = (ev) => ev.stopPropagation();
+                    input.onblur = finish;
+                    input.onkeydown = (ev) => {
+                        if (ev.key === 'Enter') {
+                            input.blur();
+                        } else if (ev.key === 'Escape') {
+                            renderTabs();
+                        }
+                        ev.stopPropagation();
+                    };
+
+                    tabEl.replaceChild(input, nameSpan);
+                    input.focus();
+                    input.select();
+                };
+                tabEl.appendChild(nameSpan);
+
+                // Close Button
+                if (state.tabs.length > 1) {
+                    const closeBtn = document.createElement('button');
+                    closeBtn.className = 'text-gray-400 hover:text-red-500 transition text-xs';
+                    closeBtn.innerHTML = '<i class="fas fa-times text-xs"></i>';
+                    closeBtn.onclick = (e) => {
+                        e.stopPropagation();
+                        deleteTab(tab.id);
+                    };
+                    tabEl.appendChild(closeBtn);
+                }
+
+                container.appendChild(tabEl);
+            });
+        }
+
+        // Tab Drag Handlers
+        function handleTabDragStart(e, tabId, el) {
+            state.draggedTabId = tabId;
+            e.dataTransfer.effectAllowed = 'move';
+            el.style.opacity = '0.4';
+        }
+
+        function handleTabDragEnd(el) {
+            state.draggedTabId = null;
+            el.style.opacity = '1';
+        }
+
+        function handleTabDragOver(e) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+        }
+
+        async function handleTabDrop(e, targetTabId) {
+            e.preventDefault();
+            if (state.draggedTabId === null || state.draggedTabId === targetTabId) return;
+
+            const fromIndex = state.tabs.findIndex(t => t.id === state.draggedTabId);
+            const toIndex = state.tabs.findIndex(t => t.id === targetTabId);
+
+            if (fromIndex !== -1 && toIndex !== -1) {
+                const [movedTab] = state.tabs.splice(fromIndex, 1);
+                state.tabs.splice(toIndex, 0, movedTab);
+                renderTabs();
+                await saveTabsToDB();
+            }
+        }
+
+        async function switchTab(tabId) {
+            if (tabId === state.activeTabId) return;
+
+            // Save current
+            const editor = document.getElementById('mermaidEditor');
+            const currentTab = state.tabs.find(t => t.id === state.activeTabId);
+            if (currentTab) {
+                currentTab.code = editor.value;
+            }
+
+            // Switch
+            state.activeTabId = tabId;
+            const newTab = state.tabs.find(t => t.id === tabId);
+            if (newTab) {
+                loadTabIntoEditor(newTab);
+            }
+
+            renderTabs();
+            await saveTabsToDB();
+        }
+
+        function loadTabIntoEditor(tab) {
+            const editor = document.getElementById('mermaidEditor');
+            editor.value = tab.code;
+            state.currentCode = tab.code;
+            updateEditorUI();
+            renderMermaid();
+        }
+
+        async function addNewTab() {
+            const editor = document.getElementById('mermaidEditor');
+            const currentTab = state.tabs.find(t => t.id === state.activeTabId);
+            if (currentTab) {
+                currentTab.code = editor.value;
+            }
+
+            state.tabCounter++;
+            const newTab = {
+                id: state.tabCounter,
+                name: `图表 ${state.tabCounter}`,
+                code: `flowchart TD\n    A[开始] --> B[结束]`
+            };
+
+            state.tabs.push(newTab);
+            state.activeTabId = newTab.id;
+
+            loadTabIntoEditor(newTab);
+            renderTabs();
+            await saveTabsToDB();
+        }
+
+        async function deleteTab(tabId) {
+            if (state.tabs.length <= 1) return;
+
+            const index = state.tabs.findIndex(t => t.id === tabId);
+            if (index === -1) return;
+
+            state.tabs.splice(index, 1);
+
+            if (state.activeTabId === tabId) {
+                state.activeTabId = state.tabs[Math.max(0, index - 1)].id;
+            }
+
+            const newTab = state.tabs.find(t => t.id === state.activeTabId);
+            if (newTab) {
+                loadTabIntoEditor(newTab);
+            }
+
+            renderTabs();
+            await saveTabsToDB();
+        }
+
+        // --- Helpers ---
+        function showConfirm(message, options = {}) {
+            return new Promise((resolve) => {
+                const modal = document.getElementById('customConfirmModal');
+                const titleEl = document.getElementById('confirmTitle');
+                const msgEl = document.getElementById('confirmMessage');
+                const okBtn = document.getElementById('confirmOkBtn');
+                const cancelBtn = document.getElementById('confirmCancelBtn');
+
+                titleEl.textContent = options.title || '确认';
+                msgEl.textContent = message;
+
+                if (options.danger) {
+                    okBtn.className = 'px-3 py-1.5 bg-red-600 text-white rounded text-xs hover:bg-red-700 transition';
+                } else {
+                    okBtn.className = 'px-3 py-1.5 bg-primary text-white rounded text-xs hover:bg-indigo-700 transition';
+                }
+
+                const close = (result) => {
+                    modal.classList.add('hidden');
+                    okBtn.onclick = null;
+                    cancelBtn.onclick = null;
+                    resolve(result);
+                };
+
+                okBtn.onclick = () => close(true);
+                cancelBtn.onclick = () => close(false);
+
+                modal.classList.remove('hidden');
+            });
+        }
+
+        function showPrompt(title, defaultValue = '') {
+            return new Promise((resolve) => {
+                const modal = document.getElementById('customPromptModal');
+                const titleEl = document.getElementById('promptTitle');
+                const inputEl = document.getElementById('promptInput');
+                const okBtn = document.getElementById('promptOkBtn');
+                const cancelBtn = document.getElementById('promptCancelBtn');
+
+                titleEl.textContent = title;
+                inputEl.value = defaultValue;
+
+                const close = (value) => {
+                    modal.classList.add('hidden');
+                    okBtn.onclick = null;
+                    cancelBtn.onclick = null;
+                    inputEl.onkeydown = null;
+                    resolve(value);
+                };
+
+                const submit = () => {
+                    const val = inputEl.value.trim();
+                    if (val) close(val);
+                };
+
+                okBtn.onclick = submit;
+                cancelBtn.onclick = () => close(null);
+
+                inputEl.onkeydown = (e) => {
+                    if (e.key === 'Enter') submit();
+                    if (e.key === 'Escape') close(null);
+                };
+
+                modal.classList.remove('hidden');
+                setTimeout(() => inputEl.focus(), 100);
+            });
+        }
+
+        function setupAutoScrollHide(el) {
+            let timeout;
+            el.addEventListener('scroll', () => {
+                el.classList.add('scrolling');
+                clearTimeout(timeout);
+                timeout = setTimeout(() => {
+                    el.classList.remove('scrolling');
+                }, 1000);
+            });
+        }
+
+        // --- Editor & UI Functions ---
+        function initEditor() {
+            const editor = document.getElementById('mermaidEditor');
+
+            // Setup scrollbar auto-hide logic
+            setupAutoScrollHide(editor);
+            // Also apply to preview container
+            const previewContainer = document.querySelector('#rightPanel > .flex-1');
+            if (previewContainer) setupAutoScrollHide(previewContainer);
+
+            // Initial Load
+            const activeTab = state.tabs.find(t => t.id === state.activeTabId);
+            if (activeTab) {
+                editor.value = activeTab.code;
+                state.currentCode = activeTab.code;
+            }
+
+            // Event Listeners
+            editor.addEventListener('input', function () {
+                state.currentCode = this.value;
+                updateEditorUI();
+            });
+
+            editor.addEventListener('scroll', function () {
+                const lineNumbers = document.getElementById('lineNumbers');
+                lineNumbers.scrollTop = this.scrollTop;
+            });
+
+            // Auto-save setup
+            let renderTimeout, saveTimeout;
+            editor.addEventListener('input', function () {
+                clearTimeout(renderTimeout);
+                clearTimeout(saveTimeout);
+
+                renderTimeout = setTimeout(renderMermaid, 500);
+                saveTimeout = setTimeout(async () => {
+                    const currentTab = state.tabs.find(t => t.id === state.activeTabId);
+                    if (currentTab) {
+                        currentTab.code = this.value;
+                        await saveTabsToDB();
+                    }
+                }, 1000);
+            });
+
+            updateEditorUI();
+        }
+
+        function updateEditorUI() {
+            const editor = document.getElementById('mermaidEditor');
+            const lineNumbers = document.getElementById('lineNumbers');
+            const lines = editor.value.split('\n').length;
+            const chars = editor.value.length;
+
+            // Update Line Numbers
+            let numbersHTML = '';
+            for (let i = 1; i <= lines; i++) {
+                numbersHTML += `<div class="text-right pr-3 text-gray-500 select-none">${i}</div>`;
+            }
+            lineNumbers.innerHTML = numbersHTML;
+
+            // Update Stats
+            document.getElementById('lineCount').textContent = lines;
+            document.getElementById('charCount').textContent = chars;
+        }
+
+        function initResizeDrag() {
+            const resizeHandle = document.getElementById('resizeHandle');
+            const leftPanel = document.getElementById('leftPanel');
+            const rightPanel = document.getElementById('rightPanel');
+            const container = document.querySelector('main');
+
+            let isDragging = false;
+            let startX, startLeftWidth;
+
+            const startDrag = (clientX) => {
+                isDragging = true;
+                startX = clientX;
+                startLeftWidth = leftPanel.offsetWidth;
+                resizeHandle.classList.add('bg-primary');
+                document.body.style.cursor = 'col-resize';
+                document.body.style.userSelect = 'none';
+            };
+
+            const doDrag = (clientX) => {
+                if (!isDragging) return;
+                const containerWidth = container.offsetWidth;
+                const deltaX = clientX - startX;
+                const newLeftWidth = startLeftWidth + deltaX;
+                const minWidth = 200;
+                const maxWidth = containerWidth - 200;
+
+                if (newLeftWidth >= minWidth && newLeftWidth <= maxWidth) {
+                    leftPanel.style.width = `${newLeftWidth}px`;
+                    rightPanel.style.width = `calc(100% - ${newLeftWidth}px)`;
+                }
+            };
+
+            const stopDrag = () => {
+                if (!isDragging) return;
+                isDragging = false;
+                resizeHandle.classList.remove('bg-primary');
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+            };
+
+            // Mouse Events
+            resizeHandle.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                startDrag(e.clientX);
+            });
+            document.addEventListener('mousemove', (e) => doDrag(e.clientX));
+            document.addEventListener('mouseup', stopDrag);
+
+            // Touch Events
+            resizeHandle.addEventListener('touchstart', (e) => {
+                e.preventDefault();
+                startDrag(e.touches[0].clientX);
+            });
+            document.addEventListener('touchmove', (e) => doDrag(e.touches[0].clientX));
+            document.addEventListener('touchend', stopDrag);
+        }
+
+        // --- Render System ---
+        async function renderMermaid() {
+            const preview = document.getElementById('mermaidPreview');
+            const activeTab = state.tabs.find(t => t.id === state.activeTabId);
+            const code = activeTab ? activeTab.code : document.getElementById('mermaidEditor').value;
+
+            if (!code.trim()) {
+                preview.innerHTML = `
+                    <div class="text-center text-gray-400">
+                        <div class="text-5xl mb-4 opacity-30">📊</div>
+                        <p class="text-lg font-medium text-gray-500">图表预览区域</p>
+                        <p class="text-sm mt-2 text-gray-400 max-w-md mx-auto">在左侧输入 Mermaid 代码,图表将实时显示在此处。</p>
+                    </div>`;
+                state.isRenderError = false;
+                return;
+            }
+
+            try {
+                state.renderCounter++;
+                const id = `mermaid-${state.renderCounter}`;
+                const { svg } = await mermaid.render(id, code);
+                preview.innerHTML = svg;
+
+                const svgElement = preview.querySelector('svg');
+                if (svgElement) {
+                    svgElement.style.maxWidth = '100%';
+                    svgElement.style.height = 'auto';
+                    svgElement.style.margin = 'auto';
+
+                    // Reset Zoom
+                    state.zoom = { level: 1, translateX: 0, translateY: 0 };
+                    svgElement.style.transform = 'scale(1) translate(0px, 0px)';
+                    svgElement.style.transformOrigin = 'center center';
+                    svgElement.style.transition = 'none';
+
+                    document.getElementById('zoomPercent').textContent = '100%';
+                    updateZoomButtons();
+                }
+
+                document.getElementById('errorMessage').classList.add('hidden');
+                document.getElementById('renderStatus').innerHTML = '<i class="fas fa-check-circle mr-1"></i>渲染正常';
+                document.getElementById('renderStatus').className = 'text-green-600 flex items-center text-xs';
+                document.getElementById('lastUpdated').textContent = '最后更新: ' + new Date().toLocaleTimeString();
+                state.isRenderError = false;
+            } catch (error) {
+                console.error('Mermaid render error:', error);
+                showError(error.message || '渲染失败,请检查语法');
+                document.getElementById('renderStatus').innerHTML = '<i class="fas fa-exclamation-circle mr-1 text-xs"></i>渲染错误';
+                document.getElementById('renderStatus').className = 'text-red-600 flex items-center text-xs';
+                state.isRenderError = true;
+            }
+        }
+
+        // --- Pan & Zoom System ---
+        function initPanZoom() {
+            const preview = document.getElementById('mermaidPreview');
+
+            const startPan = (clientX, clientY) => {
+                const svg = preview.querySelector('svg');
+                if (!svg) return false;
+                state.pan.isPanning = true;
+                state.pan.startX = clientX;
+                state.pan.startY = clientY;
+                preview.style.cursor = 'grabbing';
+                return true;
+            };
+
+            const doPan = (clientX, clientY) => {
+                if (!state.pan.isPanning) return;
+                if (state.pan.animationFrameId) cancelAnimationFrame(state.pan.animationFrameId);
+
+                state.pan.animationFrameId = requestAnimationFrame(() => {
+                    const deltaX = clientX - state.pan.startX;
+                    const deltaY = clientY - state.pan.startY;
+
+                    // Improved sensitivity (1.2x)
+                    state.zoom.translateX += (deltaX * 1.2) / state.zoom.level;
+                    state.zoom.translateY += (deltaY * 1.2) / state.zoom.level;
+
+                    state.pan.startX = clientX;
+                    state.pan.startY = clientY;
+
+                    applyZoom();
+                    state.pan.animationFrameId = null;
+                });
+            };
+
+            const stopPan = () => {
+                if (!state.pan.isPanning) return;
+                state.pan.isPanning = false;
+                document.getElementById('mermaidPreview').style.cursor = 'grab';
+            };
+
+            // Mouse
+            preview.addEventListener('mousedown', (e) => {
+                if (e.button === 0 && startPan(e.clientX, e.clientY)) e.preventDefault();
+            });
+            document.addEventListener('mousemove', (e) => doPan(e.clientX, e.clientY));
+            document.addEventListener('mouseup', stopPan);
+
+            // Touch
+            preview.addEventListener('touchstart', (e) => {
+                if (e.touches.length === 2) {
+                    const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+                    const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+                    startPan(cx, cy);
+                    e.preventDefault();
+                }
+            });
+            preview.addEventListener('touchmove', (e) => {
+                if (e.touches.length === 2) {
+                    const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+                    const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+                    doPan(cx, cy);
+                    e.preventDefault();
+                }
+            });
+            preview.addEventListener('touchend', (e) => {
+                if (e.touches.length < 2) stopPan();
+            });
+
+            // Wheel
+            preview.addEventListener('wheel', handleWheel, { passive: false });
+            preview.style.cursor = 'grab';
+        }
+
+        function handleWheel(e) {
+            const svg = document.getElementById('mermaidPreview').querySelector('svg');
+            if (!svg) return;
+            e.preventDefault();
+
+            if (e.ctrlKey) {
+                // Zoom (Pinch or Ctrl+Wheel)
+                const zoomDelta = -e.deltaY * 0.05; // Enhanced sensitivity
+                const newZoom = Math.max(CONSTANTS.MIN_ZOOM, Math.min(CONSTANTS.MAX_ZOOM, state.zoom.level + zoomDelta));
+                if (newZoom !== state.zoom.level) {
+                    state.zoom.level = newZoom;
+                    applyZoom();
+                    updateZoomButtons();
+                }
+            } else {
+                // Pan (Normal Wheel / 2-finger scroll)
+                state.zoom.translateX -= (e.deltaX * 1.2) / state.zoom.level;
+                state.zoom.translateY -= (e.deltaY * 1.2) / state.zoom.level;
+                applyZoom();
+            }
+        }
+
+        function zoomIn() {
+            if (state.zoom.level < CONSTANTS.MAX_ZOOM) {
+                state.zoom.level += CONSTANTS.ZOOM_STEP;
+                applyZoomWithTransition();
+                updateZoomButtons();
+            }
+        }
+
+        function zoomOut() {
+            if (state.zoom.level > CONSTANTS.MIN_ZOOM) {
+                state.zoom.level -= CONSTANTS.ZOOM_STEP;
+                applyZoomWithTransition();
+                updateZoomButtons();
+            }
+        }
+
+        function resetZoom() {
+            state.zoom = { level: 1, translateX: 0, translateY: 0 };
+            applyZoomWithTransition();
+            updateZoomButtons();
+        }
+
+        function fitToScreen() {
+            const preview = document.getElementById('mermaidPreview');
+            const svg = preview.querySelector('svg');
+            if (!svg) return;
+
+            const containerWidth = preview.clientWidth;
+            const containerHeight = preview.clientHeight;
+            const svgWidth = svg.getBoundingClientRect().width;
+            const svgHeight = svg.getBoundingClientRect().height;
+            const scaleX = containerWidth / svgWidth;
+            const scaleY = containerHeight / svgHeight;
+
+            state.zoom.level = Math.min(scaleX, scaleY, 1) * 0.9;
+            state.zoom.translateX = 0;
+            state.zoom.translateY = 0;
+            applyZoomWithTransition();
+            updateZoomButtons();
+        }
+
+        function applyZoom() {
+            const svg = document.getElementById('mermaidPreview').querySelector('svg');
+            if (svg) {
+                svg.style.transform = `scale(${state.zoom.level}) translate(${state.zoom.translateX}px, ${state.zoom.translateY}px)`;
+                svg.style.transformOrigin = 'center center';
+                svg.style.transition = 'none';
+                document.getElementById('zoomPercent').textContent = `${Math.round(state.zoom.level * 100)}%`;
+            }
+        }
+
+        function applyZoomWithTransition() {
+            const svg = document.getElementById('mermaidPreview').querySelector('svg');
+            if (svg) {
+                svg.style.transform = `scale(${state.zoom.level}) translate(${state.zoom.translateX}px, ${state.zoom.translateY}px)`;
+                svg.style.transformOrigin = 'center center';
+                svg.style.transition = 'transform 0.2s ease';
+                document.getElementById('zoomPercent').textContent = `${Math.round(state.zoom.level * 100)}%`;
+            }
+        }
+
+        function updateZoomButtons() {
+            const { level, translateX, translateY } = state.zoom;
+            const isReset = level === 1 && translateX === 0 && translateY === 0;
+
+            toggleBtn('zoomInBtn', level >= CONSTANTS.MAX_ZOOM);
+            toggleBtn('zoomOutBtn', level <= CONSTANTS.MIN_ZOOM);
+            toggleBtn('resetZoomBtn', isReset);
+        }
+
+        function toggleBtn(id, disabled) {
+            const btn = document.getElementById(id);
+            btn.disabled = disabled;
+            btn.classList.toggle('opacity-50', disabled);
+            btn.classList.toggle('cursor-not-allowed', disabled);
+            btn.classList.toggle('hover:bg-gray-100', !disabled);
+        }
+
+        // --- Export / Import / Helpers ---
+        function prepareSvgForExport(originalSvg) {
+            const clonedSvg = originalSvg.cloneNode(true);
+
+            // 1. Determine Dimensions strategy
+            let x, y, width, height;
+
+            // Prefer existing viewBox if valid, as Mermaid usually sets this correctly for the content
+            if (originalSvg.hasAttribute('viewBox')) {
+                const viewBox = originalSvg.getAttribute('viewBox').split(/\s+|,/).map(parseFloat);
+                if (viewBox.length === 4) {
+                    [x, y, width, height] = viewBox;
+                }
+            }
+
+            // Fallback to BBox if viewBox is missing or invalid
+            if (width === undefined || height === undefined) {
+                const box = originalSvg.getBBox();
+                x = box.x;
+                y = box.y;
+                width = box.width;
+                height = box.height;
+            }
+
+            // Add padding
+            const padding = 20;
+            width += padding * 2;
+            height += padding * 2;
+            x -= padding;
+            y -= padding;
+
+            // 2. Set explicit dimensions (Crucial for Canvas)
+            clonedSvg.setAttribute('width', width);
+            clonedSvg.setAttribute('height', height);
+            // Ensure viewBox covers the content
+            clonedSvg.setAttribute('viewBox', `${x} ${y} ${width} ${height}`);
+
+            // 3. Inject Styles (The "Brute Force" approach)
+            // Mermaid styles are scattered in <style> tags. We collect ALL of them.
+            const styleElement = document.createElement('style');
+            let cssRules = '/* Injected Styles */\n';
+
+            // Collect all <style> tags
+            document.querySelectorAll('style').forEach(tag => {
+                cssRules += tag.innerHTML + '\n';
+            });
+
+            // Collect stylesheets (Tailwind etc, best effort)
+            for (const sheet of document.styleSheets) {
+                try {
+                    if (sheet.href && !sheet.href.startsWith(window.location.origin)) continue;
+                    const rules = sheet.cssRules || sheet.rules;
+                    if (rules) {
+                        for (const rule of rules) {
+                            cssRules += rule.cssText + '\n';
+                        }
+                    }
+                } catch (e) {
+                }
+            }
+
+            styleElement.textContent = cssRules;
+            clonedSvg.insertBefore(styleElement, clonedSvg.firstChild);
+
+            // 4. Reset styles that affect layout
+            clonedSvg.style.transform = '';
+            clonedSvg.style.margin = '0';
+            clonedSvg.style.maxWidth = '';
+            clonedSvg.style.minWidth = '';
+
+            // 5. Handle ForeignObjects (HTML Labels)
+            // Ensure they have namespaces and standard HTML styles if needed
+            const foreignObjects = clonedSvg.querySelectorAll('foreignObject');
+            foreignObjects.forEach(fo => {
+                // Explicitly set xmlns for HTML inside SVG
+                const div = fo.querySelector('div');
+                if (div && !div.getAttribute('xmlns')) {
+                    div.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml');
+                }
+                // Fix for some browsers: ensure visible overflow
+                fo.style.overflow = 'visible';
+            });
+
+            return { svg: clonedSvg, width, height };
+        }
+
+        async function renderToCanvas(svgElement) {
+            // 1. Prepare SVG (Inject Styles, Fix viewBox)
+            const { svg, width, height } = prepareSvgForExport(svgElement);
+            const svgString = new XMLSerializer().serializeToString(svg);
+            const svgBase64 = btoa(unescape(encodeURIComponent(svgString)));
+            const imgUrl = 'data:image/svg+xml;base64,' + svgBase64;
+
+            // 2. Load Image
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+            await new Promise((resolve, reject) => {
+                img.onload = resolve;
+                img.onerror = () => reject(new Error('Image load failed'));
+                img.src = imgUrl;
+            });
+
+            // 3. Draw to Canvas
+            const canvas = document.createElement('canvas');
+            let scale = 2;
+            // Avoid extreme canvas sizes
+            if (width * scale > 8000 || height * scale > 8000) scale = 1;
+
+            canvas.width = width * scale;
+            canvas.height = height * scale;
+            const ctx = canvas.getContext('2d');
+            ctx.scale(scale, scale);
+
+            ctx.fillStyle = "#ffffff";
+            ctx.fillRect(0, 0, width, height);
+            ctx.drawImage(img, 0, 0, width, height);
+
+            return canvas;
+        }
+
+        async function copyImageToClipboard() {
+            const format = state.uiConfig.copyFormat || 'png';
+            const preview = document.getElementById('mermaidPreview');
+            const svgElement = preview.querySelector('svg');
+            if (!svgElement) return showNotification('请先生成有效的图表', 'error');
+
+            const btn = document.getElementById('copyImageBtn');
+            const originalText = btn.innerHTML;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i><span>处理中...</span>';
+            btn.disabled = true;
+
+            try {
+                if (format === 'svg') {
+                    const { svg } = prepareSvgForExport(svgElement);
+                    const svgString = new XMLSerializer().serializeToString(svg);
+                    await navigator.clipboard.writeText(svgString);
+                    showNotification('SVG 代码已复制', 'success');
+                    return;
+                }
+
+                const canvas = await renderToCanvas(svgElement);
+                const mimeType = format === 'jpg' ? 'image/jpeg' : 'image/png';
+                const blob = await new Promise(resolve => canvas.toBlob(resolve, mimeType, 0.9));
+
+                if (!blob) throw new Error("无法生成图片 Blob");
+
+                await navigator.clipboard.write([
+                    new ClipboardItem({ [blob.type]: blob })
+                ]);
+
+                showNotification(`图片 (${format.toUpperCase()}) 已复制`, 'success');
+
+            } catch (err) {
+                console.error('Copy Image failed:', err);
+                showNotification('复制失败: ' + err.message, 'error');
+            } finally {
+                btn.innerHTML = originalText;
+                btn.disabled = false;
+            }
+        }
+
+        async function exportDiagram() {
+            const format = state.uiConfig.exportFormat || 'png';
+            const preview = document.getElementById('mermaidPreview');
+            const svgElement = preview.querySelector('svg');
+            if (!svgElement) return showNotification('请先生成有效的图表', 'error');
+
+            try {
+                const filename = `mermaid-diagram-${Date.now()}.${format}`;
+
+                if (format === 'svg') {
+                    const { svg } = prepareSvgForExport(svgElement);
+                    const svgData = new XMLSerializer().serializeToString(svg);
+                    const blob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
+                    downloadBlob(blob, filename);
+                } else {
+                    const canvas = await renderToCanvas(svgElement);
+                    const mimeType = format === 'jpg' ? 'image/jpeg' : 'image/png';
+                    const blob = await new Promise(resolve => canvas.toBlob(resolve, mimeType, 0.9));
+                    downloadBlob(blob, filename);
+                }
+
+                showNotification(`已导出 ${format.toUpperCase()}`, 'success');
+            } catch (error) {
+                showNotification('导出失败: ' + error.message, 'error');
+            }
+        }
+
+        function downloadBlob(blob, filename) {
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.download = filename;
+            link.href = url;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            setTimeout(() => URL.revokeObjectURL(url), 100);
+        }
+
+        async function formatCode() {
+            const editor = document.getElementById('mermaidEditor');
+            const lines = editor.value.split('\n');
+            let formatted = [];
+            let indent = 0;
+
+            lines.forEach(line => {
+                const trimmed = line.trim();
+                if (trimmed === '') {
+                    formatted.push('');
+                    return;
+                }
+                if (trimmed.startsWith('end') || (trimmed.includes('-->') && !trimmed.includes('style'))) {
+                    indent = Math.max(0, indent - 2);
+                }
+                formatted.push(' '.repeat(indent) + trimmed);
+                if (trimmed.includes('subgraph') || (trimmed.includes('{') && !trimmed.includes('style'))) {
+                    indent += 2;
+                }
+            });
+
+            editor.value = formatted.join('\n');
+            state.currentCode = editor.value;
+
+            const currentTab = state.tabs.find(t => t.id === state.activeTabId);
+            if (currentTab) currentTab.code = editor.value;
+
+            updateEditorUI();
+            renderMermaid();
+            await saveTabsToDB();
+        }
+
+        async function clearEditor() {
+            if (await showConfirm('确定要清空当前图表吗?', { title: '清空确认', danger: true })) {
+                const editor = document.getElementById('mermaidEditor');
+                editor.value = '';
+                state.currentCode = '';
+
+                const currentTab = state.tabs.find(t => t.id === state.activeTabId);
+                if (currentTab) currentTab.code = '';
+
+                updateEditorUI();
+                document.getElementById('mermaidPreview').innerHTML = `
+                    <div class="text-center text-gray-400">
+                        <div class="text-4xl mb-4">📊</div>
+                        <p class="text-lg">图表预览区域</p>
+                    </div>`;
+                document.getElementById('lastUpdated').textContent = '最后更新: --';
+                await saveTabsToDB();
+            }
+        }
+
+        function copyCode() {
+            const code = document.getElementById('mermaidEditor').value;
+            navigator.clipboard.writeText(code).then(() => {
+                const btn = document.getElementById('copyBtn');
+                const originalText = btn.innerHTML;
+                btn.innerHTML = '<i class="fas fa-check"></i><span>已复制</span>';
+                btn.classList.add('bg-green-500', 'text-white');
+                setTimeout(() => {
+                    btn.innerHTML = originalText;
+                    btn.classList.remove('bg-green-500', 'text-white');
+                }, 2000);
+            });
+        }
+
+        function showError(message) {
+            const errorDiv = document.getElementById('errorMessage');
+            errorDiv.querySelector('#errorText').textContent = message;
+            errorDiv.classList.remove('hidden');
+        }
+
+        function showNotification(message, type = 'info') {
+            const existingNotification = document.getElementById('copyNotification');
+            if (existingNotification) existingNotification.remove();
+
+            const notification = document.createElement('div');
+            notification.id = 'copyNotification';
+            notification.className = `fixed top-4 right-4 z-50 px-4 py-3 rounded-lg shadow-lg flex items-center space-x-3 transition-all duration-300 transform translate-y-0 opacity-100 ${type === 'success' ? 'bg-green-50 border border-green-200 text-green-800' :
+                type === 'error' ? 'bg-red-50 border border-red-200 text-red-800' :
+                    'bg-blue-50 border border-blue-200 text-blue-800'
+                }`;
+
+            const icon = document.createElement('i');
+            icon.className = type === 'success' ? 'fas fa-check-circle text-green-500' :
+                type === 'error' ? 'fas fa-exclamation-circle text-red-500' : 'fas fa-info-circle text-blue-500';
+
+            const messageSpan = document.createElement('span');
+            messageSpan.className = 'font-medium';
+            messageSpan.textContent = message;
+
+            notification.appendChild(icon);
+            notification.appendChild(messageSpan);
+            document.body.appendChild(notification);
+
+            setTimeout(() => {
+                if (notification.parentNode) {
+                    notification.style.opacity = '0';
+                    notification.style.transform = 'translateY(-20px)';
+                    setTimeout(() => notification.remove(), 300);
+                }
+            }, 3000);
+        }
+
+
+        function closeS3ConfigModal() {
+            document.getElementById('s3ConfigModal').classList.add('hidden');
+        }
+
+        function closeS3ListModal() {
+            document.getElementById('s3ListModal').classList.add('hidden');
+            state.isSavingMode = false;
+            const saveAction = document.getElementById('s3BrowserSaveAction');
+            if (saveAction) saveAction.classList.add('hidden');
+        }
+
+        async function confirmS3Save() {
+            const filenameInput = document.getElementById('s3SaveFilename');
+            let filename = filenameInput.value.trim();
+
+            if (!filename) {
+                showNotification('请输入文件名', 'error');
+                return;
+            }
+
+            if (!filename.endsWith('.md')) filename += '.md';
+
+            const targetKey = (state.s3BrowserPath || '') + filename;
+
+            // Check if exists
+            try {
+                await remoteStorage.provider.head(targetKey);
+                if (!await showConfirm(`文件 "${filename}" 已存在，确定要覆盖吗？`, { title: '覆盖确认' })) return;
+            } catch (err) {
+                // Not found is good
+                if (err.code !== 'NotFound') {
+                    console.error(err);
+                }
+            }
+
+            state.currentFile = { type: 's3', key: targetKey };
+            closeS3ListModal();
+            handleSave(); // Now currentFile is set, it will proceed to save
+        }
+
+        // --- Export/Import Modal Logic ---
+        function openExportModal() {
+            const content = document.getElementById('exportContent');
+            let markdown = '';
+            state.tabs.forEach(tab => {
+                markdown += `### ${tab.name}\n\`\`\`mermaid\n${tab.code}\n\`\`\`\n\n`;
+            });
+            content.value = markdown.trim();
+            document.getElementById('exportModal').classList.remove('hidden');
+        }
+
+        function closeExportModal() {
+            document.getElementById('exportModal').classList.add('hidden');
+        }
+
+        function copyExportContent() {
+            const content = document.getElementById('exportContent');
+            navigator.clipboard.writeText(content.value).then(() => {
+                const btn = document.getElementById('copyExportBtn');
+                const originalText = btn.innerHTML;
+                btn.innerHTML = '<i class="fas fa-check text-xs"></i><span>已复制</span>';
+                btn.classList.add('bg-green-100', 'text-green-700');
+                setTimeout(() => {
+                    btn.innerHTML = originalText;
+                    btn.classList.remove('bg-green-100', 'text-green-700');
+                }, 2000);
+            });
+        }
+
+        function downloadExportContent() {
+            const content = document.getElementById('exportContent').value;
+            const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.download = `mermaid-charts-${Date.now()}.md`;
+            link.href = url;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            setTimeout(() => URL.revokeObjectURL(url), 100);
+            showNotification('Markdown文件已下载', 'success');
+        }
+
+        function openImportModal() {
+            document.getElementById('importContent').value = '';
+            document.getElementById('importModal').classList.remove('hidden');
+        }
+
+        function closeImportModal() {
+            document.getElementById('importModal').classList.add('hidden');
+        }
+
+        async function importMarkdown(isOverride = false, isSilent = false) {
+            const content = document.getElementById('importContent').value.trim();
+            if (!content) return showNotification('请输入Markdown内容', 'error');
+
+            const sections = content.split(/###\s+/).filter(s => s.trim());
+            if (sections.length === 0) return showNotification('未找到有效的图表内容', 'error');
+
+            if (isOverride && !isSilent) {
+                if (!await showConfirm('覆盖导入将清空当前所有图表，确定继续吗？', {
+                    title: '导入确认',
+                    danger: true
+                })) return;
+            }
+
+            if (isOverride) {
+                state.tabs = [];
+                state.tabCounter = 0;
+            }
+
+            let importedCount = 0;
+            for (const section of sections) {
+                const lines = section.split('\n');
+                const title = lines[0].trim();
+                let code = '';
+                let inCodeBlock = false;
+
+                for (let i = 1; i < lines.length; i++) {
+                    const line = lines[i];
+                    if (line.trim().startsWith('```mermaid')) {
+                        inCodeBlock = true;
+                        continue;
+                    }
+                    if (line.trim() === '```') {
+                        inCodeBlock = false;
+                        continue;
+                    }
+                    if (inCodeBlock) code += line + '\n';
+                }
+
+                if (code.trim()) {
+                    state.tabCounter++;
+                    state.tabs.push({
+                        id: state.tabCounter,
+                        name: title || `图表 ${state.tabCounter}`,
+                        code: code.trim()
+                    });
+                    importedCount++;
+                }
+            }
+
+            if (importedCount > 0) {
+                await saveTabsToDB();
+
+                // If override and empty, add a default one or just ensure activeTabId is valid
+                if (state.tabs.length === 0) {
+                    // Should technically not happen if importedCount > 0, but good for safety
+                    state.tabCounter++;
+                    state.tabs.push({ id: state.tabCounter, name: '图表 1', code: INITIAL_CODE });
+                }
+
+                state.activeTabId = state.tabs[state.tabs.length - 1].id;
+                renderTabs();
+
+                const currentTab = state.tabs.find(t => t.id === state.activeTabId);
+                if (currentTab) loadTabIntoEditor(currentTab);
+
+                closeImportModal();
+                showNotification(`成功导入 ${importedCount} 个图表`, 'success');
+            } else {
+                showNotification('未找到有效的图表内容', 'error');
+            }
+        }
+
+        async function loadExample() {
+            const example = document.getElementById('exampleSelect').value;
+            let code = '';
+            switch (example) {
+                case 'flowchart':
+                    code = INITIAL_CODE;
+                    break;
+                case 'sequence':
+                    code = `sequenceDiagram\n    participant A as Alice\n    participant B as Bob\n    A->>B: Hello Bob, how are you?\n    B->>A: I'm good thanks!\n    Note right of B: Bob thinks about it\n    B->>A: How about you?`;
+                    break;
+                case 'class':
+                    code = `classDiagram\n    Animal <|-- Duck\n    Animal <|-- Fish\n    Animal <|-- Zebra\n    Animal : +int age\n    Animal : +String gender\n    Animal: +isMammal()\n    Animal: +mate()\n    class Duck{\n      +String beakColor\n      +swim()\n      +quack()\n    }`;
+                    break;
+                case 'gantt':
+                    code = `gantt\n    title 项目时间表\n    dateFormat  YYYY-MM-DD\n    section 设计\n    需求分析    :done, des1, 2023-01-01, 7d\n    原型设计    :active, des2, 2023-01-08, 5d\n    UI设计      :des3, after des2, 5d\n    section 开发\n    前端开发    :dev1, after des3, 10d\n    后端开发    :dev2, after des3, 14d\n    section 测试\n    单元测试    :test1, after dev1, 5d\n    集成测试    :test2, after dev2, 7d`;
+                    break;
+            }
+
+            state.currentCode = code;
+            const currentTab = state.tabs.find(t => t.id === state.activeTabId);
+            if (currentTab) currentTab.code = code;
+
+            loadTabIntoEditor({ code });
+            await saveTabsToDB();
+        }
+
+        // --- Event Binding ---
+        function bindEvents() {
+            document.getElementById('exportBtn').addEventListener('click', exportDiagram);
+            document.getElementById('formatBtn').addEventListener('click', formatCode);
+            document.getElementById('clearBtn').addEventListener('click', clearEditor);
+            document.getElementById('copyBtn').addEventListener('click', copyCode);
+            document.getElementById('addTabBtn').addEventListener('click', addNewTab);
+
+            document.getElementById('exportMarkdownBtn').addEventListener('click', openExportModal);
+            document.getElementById('closeExportModal').addEventListener('click', closeExportModal);
+            document.getElementById('copyExportBtn').addEventListener('click', copyExportContent);
+            document.getElementById('downloadExportBtn').addEventListener('click', downloadExportContent);
+
+            document.getElementById('importMarkdownBtn').addEventListener('click', openImportModal);
+            document.getElementById('closeImportModal').addEventListener('click', closeImportModal);
+            document.getElementById('cancelImportBtn').addEventListener('click', closeImportModal);
+            document.getElementById('appendImportBtn').addEventListener('click', () => importMarkdown(false));
+            document.getElementById('overrideImportBtn').addEventListener('click', () => importMarkdown(true));
+
+            // S3 Events
+            document.getElementById('s3ConfigBtn').addEventListener('click', openS3ConfigModal);
+            document.getElementById('closeS3ConfigModal').addEventListener('click', closeS3ConfigModal);
+            document.getElementById('saveS3ConfigBtn').addEventListener('click', saveS3Config);
+            document.getElementById('closeS3ListModal').addEventListener('click', closeS3ListModal);
+
+            // Footer Events
+            document.getElementById('fileStatusDisplay').addEventListener('click', () => {
+                let targetPath = null;
+
+                if (state.currentFile.type === 's3' && state.currentFile.key) {
+                    const lastSlash = state.currentFile.key.lastIndexOf('/');
+                    targetPath = lastSlash !== -1 ? state.currentFile.key.substring(0, lastSlash + 1) : '';
+                }
+
+                if (state.currentFile.type === 's3') {
+                    // Auto-save before list
+                    handleSave(true).then(() => listS3Files(targetPath));
+                } else {
+                    listS3Files(targetPath);
+                }
+            });
+            document.getElementById('footerSaveBtn').addEventListener('click', () => handleSave(false));
+            document.getElementById('footerNewBtn').addEventListener('click', handleNewFile);
+
+            document.getElementById('themeSelect').addEventListener('change', function () {
+                mermaid.initialize({ theme: this.value });
+                renderMermaid();
+            });
+
+            document.getElementById('exampleSelect').addEventListener('change', loadExample);
+            document.getElementById('zoomInBtn').addEventListener('click', zoomIn);
+            document.getElementById('zoomOutBtn').addEventListener('click', zoomOut);
+            document.getElementById('resetZoomBtn').addEventListener('click', resetZoom);
+            document.getElementById('fitToScreenBtn').addEventListener('click', fitToScreen);
+            document.getElementById('copyImageBtn').addEventListener('click', copyImageToClipboard);
+            document.getElementById('refreshBtn').addEventListener('click', function () {
+                const icon = this.querySelector('i');
+                icon.classList.add('fa-spin');
+                renderMermaid().then(() => {
+                    setTimeout(() => icon.classList.remove('fa-spin'), 500);
+                });
+            });
+
+            document.addEventListener('keydown', function (e) {
+                if (e.ctrlKey || e.metaKey) {
+                    if (e.key === '+' || e.key === '=') {
+                        e.preventDefault();
+                        zoomIn();
+                    }
+                    if (e.key === '-') {
+                        e.preventDefault();
+                        zoomOut();
+                    }
+                    if (e.key === '0') {
+                        e.preventDefault();
+                        resetZoom();
+                    }
+                    if (e.key === 'c' || e.key === 'C') {
+                        if (e.shiftKey) {
+                            e.preventDefault();
+                            copyImageToClipboard();
+                        }
+                    }
+                }
+            });
+        }
+    </script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        body {
+            position: fixed;
+            inset: 0;
+            overscroll-behavior: none;
+        }
+
+        .code-editor {
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 12px;
+            line-height: 1.4;
+            tab-size: 2;
+        }
+
+        .code-editor:focus {
+            outline: none;
+        }
+
+        .line-numbers {
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 12px;
+            line-height: 1.4;
+            user-select: none;
+        }
+
+        #tabsContainer::-webkit-scrollbar {
+            height: 4px;
+        }
+
+        #tabsContainer::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        #tabsContainer::-webkit-scrollbar-thumb {
+            background: #c1c1c1;
+            border-radius: 2px;
+        }
+
+        #tabsContainer::-webkit-scrollbar-thumb:hover {
+            background: #a8a8a8;
+        }
+
+        .mermaid svg {
+            max-width: 100% !important;
+            height: auto !important;
+        }
+
+        .scrollbar-thin::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+            background: transparent;
+        }
+
+        .scrollbar-thin::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .scrollbar-thin::-webkit-scrollbar-thumb {
+            background: rgba(156, 163, 175, 0);
+            border-radius: 3px;
+            /* Delay hide: wait 1s, then fade out over 0.5s */
+            transition: background 0.5s ease-in-out 1s;
+        }
+
+        .scrollbar-thin:hover::-webkit-scrollbar-thumb,
+        .scrollbar-thin.scrolling::-webkit-scrollbar-thumb {
+            background: rgba(156, 163, 175, 0.5);
+            /* Show immediately */
+            transition: background 0.1s ease-in-out 0s;
+        }
+
+        .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+            background: rgba(107, 114, 128, 0.8);
+            transition: background 0.1s ease-in-out 0s;
+        }
+
+        .resize-handle {
+            transition: background-color 0.2s;
+        }
+
+        .resize-handle:hover {
+            background-color: #6366f1;
+        }
+
+        .zoom-controls {
+            display: flex;
+            align-items: center;
+            background: white;
+            border-radius: 4px;
+            border: 1px solid #e5e7eb;
+            overflow: hidden;
+        }
+
+        .zoom-btn {
+            width: 24px;
+            height: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border: none;
+            background: transparent;
+            color: #6b7280;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .zoom-btn:hover:not(:disabled) {
+            background-color: #f3f4f6;
+            color: #374151;
+        }
+
+        .zoom-btn:active:not(:disabled) {
+            background-color: #e5e7eb;
+        }
+
+        .zoom-btn:disabled {
+            cursor: not-allowed;
+        }
+
+        .zoom-separator {
+            width: 1px;
+            height: 12px;
+            background-color: #e5e7eb;
+            align-self: center;
+        }
+
+        .zoom-percent {
+            min-width: 40px;
+            text-align: center;
+            font-size: 10px;
+            font-weight: 500;
+            color: #374151;
+            padding: 0 6px;
+        }
+
+        #mermaidPreview {
+            overflow: auto !important;
+            cursor: grab;
+        }
+
+        #mermaidPreview:active {
+            cursor: grabbing;
+        }
+
+        #mermaidPreview svg {
+            transform-origin: center center;
+        }
+
+        @keyframes spin {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+
+        .fa-spin {
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes slideIn {
+            from {
+                transform: translateX(100%);
+                opacity: 0;
+            }
+
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+
+        #copyNotification {
+            animation: slideIn 0.3s ease-out;
+            min-width: 250px;
+            max-width: 350px;
+        }
+
+        .fixed.inset-0 {
+            backdrop-filter: blur(2px);
+        }
+
+        textarea:focus {
+            outline: none;
+        }
+    </style>
+</head>
+
+<body class="bg-gray-50 h-screen overflow-hidden">
+    <div class="flex flex-col h-full w-full">
+        <header
+            class="flex-shrink-0 flex items-center justify-between px-4 py-2 bg-white border-b border-gray-200 shadow-sm z-50">
+            <div class="flex items-center space-x-4">
+                <div class="flex items-center space-x-2">
+                    <svg class="w-5 h-5" viewBox="0 0 100 100">
+                        <rect width="100" height="100" rx="15" fill="#6366f1" />
+                        <circle cx="25" cy="30" r="10" fill="white" />
+                        <circle cx="75" cy="30" r="10" fill="white" />
+                        <circle cx="25" cy="70" r="10" fill="white" />
+                        <circle cx="75" cy="70" r="10" fill="white" />
+                        <path d="M35 30 L65 30" stroke="white" stroke-width="3" stroke-linecap="round" />
+                        <path d="M35 70 L65 70" stroke="white" stroke-width="3" stroke-linecap="round" />
+                        <path d="M25 40 L25 60" stroke="white" stroke-width="3" stroke-linecap="round" />
+                        <path d="M75 40 L75 60" stroke="white" stroke-width="3" stroke-linecap="round" />
+                        <path d="M35 40 L65 60" stroke="white" stroke-width="3" stroke-linecap="round" />
+                        <path d="M65 40 L35 60" stroke="white" stroke-width="3" stroke-linecap="round" />
+                    </svg>
+                    <h1 class="text-base font-bold text-gray-800">Mermaid 图表编辑器</h1>
+                </div>
+
+                <div class="flex items-center space-x-3 text-xs">
+                    <div class="flex items-center space-x-1">
+                        <span class="text-gray-500">主题:</span>
+                        <select id="themeSelect"
+                            class="border border-gray-300 rounded px-2 py-0.5 text-xs focus:outline-none focus:ring-1 focus:ring-primary focus:border-transparent">
+                            <option value="default">默认</option>
+                            <option value="forest">森林</option>
+                            <option value="dark">暗黑</option>
+                            <option value="neutral">中性</option>
+                        </select>
+                    </div>
+
+                    <div class="flex items-center space-x-1">
+                        <span class="text-gray-500">示例:</span>
+                        <select id="exampleSelect"
+                            class="border border-gray-300 rounded px-2 py-0.5 text-xs focus:outline-none focus:ring-1 focus:ring-primary focus:border-transparent">
+                            <option value="flowchart">流程图</option>
+                            <option value="sequence">时序图</option>
+                            <option value="class">类图</option>
+                            <option value="gantt">甘特图</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+
+            <div class="flex items-center space-x-2">
+                <span class="text-xs text-gray-400">
+                    <i class="fas fa-info-circle mr-1"></i>双击标签名称可修改
+                </span>
+                <button id="clearBtn"
+                    class="flex items-center space-x-1 bg-gray-100 hover:bg-red-100 text-gray-700 hover:text-red-700 px-2 py-1 rounded text-xs font-medium transition">
+                    <i class="fas fa-trash-alt text-xs"></i>
+                    <span>清空</span>
+                </button>
+                <div class="h-4 w-px bg-gray-300"></div>
+                <div class="text-xs text-gray-500">
+                    行数: <span id="lineCount" class="font-medium text-gray-700">1</span> | 字符: <span id="charCount"
+                        class="font-medium text-gray-700">0</span>
+                </div>
+                <button id="copyBtn"
+                    class="flex items-center space-x-1 bg-yellow-50 hover:bg-yellow-100 text-yellow-700 px-2 py-1 rounded text-xs font-medium transition">
+                    <i class="fas fa-copy text-xs"></i>
+                    <span>复制代码</span>
+                </button>
+
+                <button id="formatBtn"
+                    class="flex items-center space-x-1 bg-blue-50 hover:bg-blue-100 text-blue-700 px-2 py-1 rounded text-xs font-medium transition">
+                    <i class="fas fa-code text-xs"></i>
+                    <span>格式化</span>
+                </button>
+
+                <button id="copyImageBtn"
+                    class="flex items-center space-x-1 bg-purple-50 hover:bg-purple-100 text-purple-700 px-2 py-1 rounded text-xs font-medium transition">
+                    <i class="fas fa-camera text-xs"></i>
+                    <span>复制图片</span>
+                </button>
+
+                <button id="exportBtn"
+                    class="flex items-center space-x-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 px-2 py-1 rounded text-xs font-medium transition">
+                    <i class="fas fa-download text-xs"></i>
+                    <span>导出图片</span>
+                </button>
+                <button id="exportMarkdownBtn"
+                    class="flex items-center space-x-1 bg-green-50 hover:bg-green-100 text-green-700 px-2 py-1 rounded text-xs font-medium transition">
+                    <i class="fas fa-file-export text-xs"></i>
+                    <span>导出MD</span>
+                </button>
+                <button id="importMarkdownBtn"
+                    class="flex items-center space-x-1 bg-orange-50 hover:bg-orange-100 text-orange-700 px-2 py-1 rounded text-xs font-medium transition">
+                    <i class="fas fa-file-import text-xs"></i>
+                    <span>导入MD</span>
+                </button>
+                <div class="h-4 w-px bg-gray-300"></div>
+                <button id="s3ConfigBtn" title="S3 配置"
+                    class="flex items-center justify-center w-6 h-6 bg-gray-100 hover:bg-gray-200 text-gray-600 rounded transition">
+                    <i class="fas fa-cog text-xs"></i>
+                </button>
+                <a href="https://github.com/lizhian/mermaid-tool" target="_blank" title="GitHub 源码"
+                    class="flex items-center justify-center w-6 h-6 bg-gray-100 hover:bg-gray-200 text-gray-600 hover:text-gray-900 rounded transition">
+                    <i class="fab fa-github text-xs"></i>
+                </a>
+            </div>
+        </header>
+
+        <main class="flex flex-1 overflow-hidden relative">
+            <section id="leftPanel" class="flex flex-col border-r border-gray-200 bg-white" style="width: 50%">
+                <div class="flex items-center bg-gray-100 border-b border-gray-200 px-2 py-0.5 h-9">
+                    <div id="tabsContainer" class="flex items-center flex-1 space-x-1 overflow-x-auto">
+                    </div>
+                    <button id="addTabBtn"
+                        class="flex items-center justify-center w-6 h-6 ml-2 text-gray-500 hover:text-primary hover:bg-gray-200 rounded transition"
+                        title="添加新图表">
+                        <i class="fas fa-plus text-xs"></i>
+                    </button>
+                </div>
+
+                <div class="flex flex-1 overflow-hidden relative">
+                    <div id="lineNumbers"
+                        class="line-numbers absolute left-0 top-0 bottom-0 w-10 bg-gray-50 border-r border-gray-200 overflow-hidden py-2 px-1 text-right select-none">
+                    </div>
+
+                    <textarea id="mermaidEditor"
+                        class="code-editor flex-1 pl-11 pr-3 py-2 bg-white resize-none focus:outline-none overflow-auto scrollbar-thin text-xs whitespace-pre"
+                        spellcheck="false"
+                        placeholder="在此输入 Mermaid 代码,例如:&#10;flowchart TD&#10;    A[开始] --> B[结束]"></textarea>
+                </div>
+
+
+                <!-- Footer Status Bar -->
+                <div
+                    class="flex items-center justify-between px-3 py-1.5 bg-white border-t border-gray-200 text-xs h-[33px]">
+                    <div class="flex items-center">
+                        <div id="fileStatusDisplay"
+                            class="flex items-center space-x-2 text-gray-600 cursor-pointer hover:bg-gray-100 px-2 py-1 rounded transition"
+                            title="点击切换文件">
+                            <i class="fas fa-hdd"></i>
+                            <span class="font-mono">本地存储</span>
+                        </div>
+                        <span id="lastSavedTime" class="text-gray-400 text-[10px] ml-3 hidden sm:inline-block"></span>
+                    </div>
+                    <div class="flex items-center space-x-2">
+                        <span id="autoSaveCountdown" class="text-[10px] text-orange-500 font-mono hidden mr-1"></span>
+                        <button id="footerNewBtn"
+                            class="hidden flex items-center space-x-1 text-gray-600 hover:text-primary px-2 py-1 rounded hover:bg-gray-100 transition"
+                            title="新建文件">
+                            <i class="fas fa-file-medical"></i>
+                            <span>新建</span>
+                        </button>
+                        <button id="footerSaveBtn"
+                            class="hidden flex items-center space-x-1 text-gray-600 hover:text-green-600 px-2 py-1 rounded hover:bg-gray-100 transition"
+                            title="保存到云端">
+                            <i class="fas fa-cloud-upload-alt"></i>
+                            <span>保存</span>
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <div id="resizeHandle"
+                class="resize-handle w-0.5 bg-gray-300 hover:bg-primary cursor-col-resize flex items-center justify-center relative z-10">
+                <div class="w-2 h-8 bg-gray-400 rounded-full opacity-50"></div>
+            </div>
+
+            <section id="rightPanel" class="flex flex-col bg-gray-50 relative" style="width: 50%">
+                <div class="flex items-center justify-between px-3 py-1 border-b border-gray-200 bg-white h-9">
+                    <div class="flex items-center space-x-3">
+                        <h2 class="text-xs font-semibold text-gray-700 flex items-center">
+                            <i class="fas fa-chart-bar mr-1 text-primary text-xs"></i>
+                            实时预览
+                        </h2>
+
+                        <div class="zoom-controls">
+                            <button id="zoomOutBtn" class="zoom-btn" title="缩小 (Ctrl + -)">
+                                <i class="fas fa-search-minus text-xs"></i>
+                            </button>
+                            <div class="zoom-separator"></div>
+                            <button id="fitToScreenBtn" class="zoom-btn" title="适应屏幕">
+                                <i class="fas fa-expand text-xs"></i>
+                            </button>
+                            <div class="zoom-separator"></div>
+                            <span class="zoom-percent" id="zoomPercent">100%</span>
+                            <div class="zoom-separator"></div>
+                            <button id="resetZoomBtn" class="zoom-btn" title="重置缩放 (Ctrl + 0)">
+                                <i class="fas fa-refresh text-xs"></i>
+                            </button>
+                            <div class="zoom-separator"></div>
+                            <button id="zoomInBtn" class="zoom-btn" title="放大 (Ctrl + +)">
+                                <i class="fas fa-search-plus text-xs"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="flex items-center space-x-2 text-xs text-gray-500">
+                        <span class="flex items-center text-xs">
+                            <i class="fas fa-sync-alt mr-1 text-xs"></i>
+                            自动更新
+                        </span>
+                        <span class="h-3 w-px bg-gray-300"></span>
+                        <span class="text-xs">SVG 渲染</span>
+                        <span class="h-3 w-px bg-gray-300"></span>
+                        <span class="text-xs" title="复制图片快捷键">Ctrl+Shift+C</span>
+                    </div>
+                </div>
+
+                <div class="flex-1 overflow-auto p-3 scrollbar-thin">
+                    <div id="errorMessage"
+                        class="hidden absolute bottom-4 left-4 right-4 mx-auto max-w-md p-3 bg-red-50/90 backdrop-blur border border-red-200 rounded-lg shadow-lg z-20">
+                        <div class="flex items-start">
+                            <div class="flex-shrink-0">
+                                <i class="fas fa-exclamation-circle text-red-500 text-sm"></i>
+                            </div>
+                            <div class="ml-2 flex-1">
+                                <h3 class="text-xs font-bold text-red-800">语法错误</h3>
+                                <div class="mt-1 text-xs text-red-700 break-words font-mono">
+                                    <p id="errorText"></p>
+                                </div>
+                            </div>
+                            <button onclick="document.getElementById('errorMessage').classList.add('hidden')"
+                                class="ml-2 text-red-400 hover:text-red-600">
+                                <i class="fas fa-times text-xs"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div id="mermaidPreview" class="min-h-full flex items-center justify-center">
+                        <div class="text-center text-gray-400">
+                            <div class="text-5xl mb-4 opacity-30">📊</div>
+                            <p class="text-lg font-medium text-gray-500">图表预览区域</p>
+                            <p class="text-sm mt-2 text-gray-400 max-w-md mx-auto">在左侧输入 Mermaid 代码,图表将实时显示在此处。Mermaid
+                                支持流程图、时序图、类图、状态图等多种图表类型。</p>
+                            <div class="mt-6 grid grid-cols-2 gap-3 max-w-xs mx-auto">
+                                <div class="p-3 bg-white rounded-lg border border-gray-200 text-xs">
+                                    <div class="font-medium text-gray-700">流程图</div>
+                                    <div class="text-gray-500 mt-1">flowchart TD</div>
+                                </div>
+                                <div class="p-3 bg-white rounded-lg border border-gray-200 text-xs">
+                                    <div class="font-medium text-gray-700">时序图</div>
+                                    <div class="text-gray-500 mt-1">sequenceDiagram</div>
+                                </div>
+                                <div class="p-3 bg-white rounded-lg border border-gray-200 text-xs">
+                                    <div class="font-medium text-gray-700">类图</div>
+                                    <div class="text-gray-500 mt-1">classDiagram</div>
+                                </div>
+                                <div class="p-3 bg-white rounded-lg border border-gray-200 text-xs">
+                                    <div class="font-medium text-gray-700">甘特图</div>
+                                    <div class="text-gray-500 mt-1">gantt</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div
+                    class="px-3 py-1 border-t border-gray-200 bg-white text-xs text-gray-500 flex items-center justify-between h-[33px]">
+                    <div class="flex items-center space-x-3">
+                        <span class="flex items-center">
+                            <i class="fas fa-info-circle mr-1 text-xs"></i>
+                            编辑器已就绪
+                        </span>
+                        <span id="renderStatus" class="text-green-600 flex items-center text-xs">
+                            <i class="fas fa-check-circle mr-1 text-xs"></i>
+                            渲染正常
+                        </span>
+                    </div>
+                    <div class="text-xs flex items-center">
+                        <button id="refreshBtn"
+                            class="flex items-center justify-center w-6 h-5 text-gray-500 hover:text-primary hover:bg-gray-200 rounded transition mr-2"
+                            title="刷新图表">
+                            <i class="fas fa-sync-alt text-xs"></i>
+                        </button>
+                        <span id="lastUpdated">最后更新: 刚刚</span>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <div id="exportModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 hidden">
+        <div class="bg-white rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[80vh] flex flex-col">
+            <div class="flex items-center justify-between px-4 py-3 border-b border-gray-200">
+                <h3 class="text-sm font-semibold text-gray-800">导出 Markdown</h3>
+                <button id="closeExportModal" class="text-gray-400 hover:text-gray-600 transition">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="flex-1 overflow-auto p-4">
+                <textarea id="exportContent"
+                    class="w-full h-64 p-3 border border-gray-300 rounded-md text-xs font-mono resize-none focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent"
+                    readonly></textarea>
+            </div>
+            <div
+                class="flex items-center justify-end space-x-3 px-4 py-3 border-t border-gray-200 bg-gray-50 rounded-b-lg">
+                <button id="copyExportBtn"
+                    class="flex items-center space-x-1 bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-1.5 rounded text-xs font-medium transition">
+                    <i class="fas fa-copy text-xs"></i>
+                    <span>复制</span>
+                </button>
+                <button id="downloadExportBtn"
+                    class="flex items-center space-x-1 bg-primary hover:bg-indigo-700 text-white px-3 py-1.5 rounded text-xs font-medium transition">
+                    <i class="fas fa-download text-xs"></i>
+                    <span>下载</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div id="importModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 hidden">
+        <div class="bg-white rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[80vh] flex flex-col">
+            <div class="flex items-center justify-between px-4 py-3 border-b border-gray-200">
+                <h3 class="text-sm font-semibold text-gray-800">导入 Markdown</h3>
+                <button id="closeImportModal" class="text-gray-400 hover:text-gray-600 transition">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="flex-1 overflow-auto p-4">
+                <div class="mb-3 p-2 bg-blue-50 border border-blue-200 rounded text-xs text-blue-800">
+                    <i class="fas fa-info-circle mr-1"></i>
+                    请输入Markdown格式的图表内容，每个图表以"### 标题"开头，代码块使用"```mermaid"包裹
+                </div>
+                <textarea id="importContent"
+                    class="w-full h-64 p-3 border border-gray-300 rounded-md text-xs font-mono resize-none focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent"
+                    placeholder="### 图表1&#10;```mermaid&#10;flowchart TD&#10;    A[开始] --> B[结束]&#10;```"></textarea>
+            </div>
+            <div
+                class="flex items-center justify-end space-x-3 px-4 py-3 border-t border-gray-200 bg-gray-50 rounded-b-lg">
+                <button id="cancelImportBtn"
+                    class="flex items-center space-x-1 bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-1.5 rounded text-xs font-medium transition">
+                    <i class="fas fa-times text-xs"></i>
+                    <span>取消</span>
+                </button>
+                <button id="appendImportBtn"
+                    class="flex items-center space-x-1 bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded text-xs font-medium transition">
+                    <i class="fas fa-plus text-xs"></i>
+                    <span>增量导入</span>
+                </button>
+                <button id="overrideImportBtn"
+                    class="flex items-center space-x-1 bg-red-600 hover:bg-red-700 text-white px-3 py-1.5 rounded text-xs font-medium transition">
+                    <i class="fas fa-trash-alt text-xs"></i>
+                    <span>覆盖导入</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- S3 Config Modal -->
+    <!-- S3 Configuration Modal -->
+    <div id="s3ConfigModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 hidden">
+        <div class="bg-white rounded-lg shadow-xl max-w-2xl w-full mx-4 flex flex-col max-h-[90vh]">
+            <div class="flex items-center justify-between px-6 py-4 border-b border-gray-200">
+                <h3 class="text-base font-semibold text-gray-800">系统设置</h3>
+                <button id="closeS3ConfigModal" class="text-gray-400 hover:text-gray-600 transition">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+
+            <div class="flex-1 overflow-y-auto p-6">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                    <!-- Left Column: Storage -->
+                    <div class="space-y-4">
+                        <div class="flex items-center space-x-2 text-primary border-b border-gray-100 pb-2 mb-4">
+                            <i class="fas fa-database"></i>
+                            <h4 class="text-sm font-bold uppercase tracking-wider">存储配置 (S3)</h4>
+                        </div>
+
+                        <div>
+                            <label class="block text-xs font-medium text-gray-700 mb-1">Endpoint (可选)</label>
+                            <input id="s3Endpoint" type="text" placeholder="https://s3.amazonaws.com"
+                                class="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:ring-1 focus:ring-primary focus:border-transparent transition-shadow">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-700 mb-1">Region (可选)</label>
+                            <input id="s3Region" type="text" placeholder="us-east-1"
+                                class="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:ring-1 focus:ring-primary focus:border-transparent transition-shadow">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-700 mb-1">Access Key ID <span
+                                    class="text-red-500">*</span></label>
+                            <input id="s3AccessKey" type="text"
+                                class="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:ring-1 focus:ring-primary focus:border-transparent transition-shadow">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-700 mb-1">Secret Access Key <span
+                                    class="text-red-500">*</span></label>
+                            <input id="s3SecretKey" type="password"
+                                class="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:ring-1 focus:ring-primary focus:border-transparent transition-shadow">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-700 mb-1">Bucket Name <span
+                                    class="text-red-500">*</span></label>
+                            <input id="s3Bucket" type="text"
+                                class="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:ring-1 focus:ring-primary focus:border-transparent transition-shadow">
+                        </div>
+
+                        <div class="text-[10px] text-yellow-700 bg-yellow-50 p-3 rounded border border-yellow-200 mt-4">
+                            <i class="fas fa-shield-alt mr-1"></i> 安全提示：密钥仅保存在您浏览器的 LocalStorage
+                            中，不会发送到任何第三方服务器。
+                        </div>
+                    </div>
+
+                    <!-- Right Column: Preferences -->
+                    <div class="space-y-8">
+
+                        <!-- Backup Settings -->
+                        <div class="space-y-4">
+                            <div class="flex items-center space-x-2 text-secondary border-b border-gray-100 pb-2 mb-4">
+                                <i class="fas fa-history"></i>
+                                <h4 class="text-sm font-bold uppercase tracking-wider">备份策略</h4>
+                            </div>
+
+                            <div>
+                                <label class="block text-xs font-medium text-gray-700 mb-1">最大保留版本数</label>
+                                <input id="s3MaxBackups" type="number" min="1" max="100" value="10"
+                                    class="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:ring-1 focus:ring-primary focus:border-transparent transition-shadow">
+                                <p class="text-[10px] text-gray-400 mt-1">超过数量的旧版本将被自动清理</p>
+                            </div>
+
+                            <div class="pt-2">
+                                <div class="flex items-center space-x-2 mb-2">
+                                    <input type="checkbox" id="s3EnableAutoSave"
+                                        class="rounded text-primary focus:ring-primary h-4 w-4"
+                                        onchange="toggleIdleTimeInput(this.checked)">
+                                    <label for="s3EnableAutoSave"
+                                        class="text-xs font-medium text-gray-700 select-none cursor-pointer">启用自动保存</label>
+                                </div>
+
+                                <div id="s3IdleTimeContainer" class="pl-6 hidden transition-all">
+                                    <label class="block text-xs font-medium text-gray-700 mb-1">空闲时间 (分钟)</label>
+                                    <input id="s3IdleTime" type="number" min="1" max="60" value="1"
+                                        class="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:ring-1 focus:ring-primary focus:border-transparent transition-shadow">
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- UI Settings -->
+                        <div class="space-y-4">
+                            <div class="flex items-center space-x-2 text-accent border-b border-gray-100 pb-2 mb-4">
+                                <i class="fas fa-image"></i>
+                                <h4 class="text-sm font-bold uppercase tracking-wider">导出设置</h4>
+                            </div>
+                            <div class="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-700 mb-1">剪贴板复制格式</label>
+                                    <select id="uiCopyFormat"
+                                        class="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:ring-1 focus:ring-primary focus:border-transparent bg-white">
+                                        <option value="png">PNG (位图)</option>
+                                        <option value="jpg">JPG (压缩)</option>
+                                        <option value="svg">SVG (矢量)</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-700 mb-1">文件导出格式</label>
+                                    <select id="uiExportFormat"
+                                        class="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:ring-1 focus:ring-primary focus:border-transparent bg-white">
+                                        <option value="png">PNG (位图)</option>
+                                        <option value="jpg">JPG (压缩)</option>
+                                        <option value="svg">SVG (矢量)</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div
+                class="flex items-center justify-end space-x-3 px-6 py-4 border-t border-gray-200 bg-gray-50 rounded-b-lg">
+                <button onclick="document.getElementById('closeS3ConfigModal').click()"
+                    class="px-4 py-2 border border-gray-300 rounded text-xs text-gray-600 hover:bg-white hover:shadow-sm transition font-medium">
+                    取消
+                </button>
+                <button id="saveS3ConfigBtn"
+                    class="flex items-center space-x-2 bg-primary hover:bg-indigo-700 text-white px-6 py-2 rounded text-xs font-medium transition shadow-sm hover:shadow">
+                    <i class="fas fa-check"></i>
+                    <span>保存配置</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- S3 File List Modal -->
+    <div id="s3ListModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 hidden">
+        <div class="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 max-h-[80vh] flex flex-col overflow-hidden">
+            <div class="flex items-center justify-between px-4 py-3 border-b border-gray-200">
+                <div class="flex flex-col">
+                    <h3 class="text-sm font-semibold text-gray-800">云端文件</h3>
+                    <div id="s3Breadcrumbs" class="text-xs text-gray-500 mt-1 flex items-center space-x-1"></div>
+                </div>
+                <div class="flex items-center space-x-2">
+                    <button class="text-gray-500 hover:text-primary p-1 rounded transition" title="新建文件夹"
+                        onclick="createS3Folder()">
+                        <i class="fas fa-folder-plus"></i>
+                    </button>
+                    <button id="closeS3ListModal" class="text-gray-400 hover:text-gray-600 transition">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="flex-1 overflow-auto" id="s3FileList">
+                <!-- File items will be injected here -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Diff Modal (Side-by-Side) -->
+    <div id="diffModal"
+        class="fixed inset-0 bg-black bg-opacity-50 z-[60] hidden flex items-center justify-center backdrop-blur-sm">
+        <div class="bg-white rounded-lg shadow-2xl w-[95vw] h-[85vh] flex flex-col mx-4 overflow-hidden">
+            <!-- Header -->
+            <div class="flex-shrink-0 flex items-center justify-between px-4 py-2 border-b border-gray-200 bg-gray-50">
+                <div class="flex items-center space-x-4">
+                    <h3 class="font-bold text-gray-800 text-sm">版本对比</h3>
+                    <label class="flex items-center space-x-2 text-xs text-gray-600 cursor-pointer select-none">
+                        <input type="checkbox" id="diffOnlyCheck" class="rounded text-primary focus:ring-primary"
+                            checked>
+                        <span>只显示差异内容</span>
+                    </label>
+                </div>
+                <div class="space-x-2">
+                    <button onclick="closeDiffModal()"
+                        class="text-gray-500 hover:text-gray-700 hover:bg-gray-200 px-2 py-1 rounded transition">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+            </div>
+            <!-- Diff Content -->
+            <div class="flex-1 overflow-hidden flex text-xs font-mono relative bg-white">
+                <!-- Left: Backup -->
+                <div class="w-1/2 border-r border-gray-200 flex flex-col">
+                    <div
+                        class="flex-shrink-0 px-2 py-1 bg-gray-100 border-b border-gray-200 font-semibold text-center text-gray-600 text-[10px] uppercase tracking-wider">
+                        备份版本 (旧)
+                    </div>
+                    <div id="diffLeft" class="flex-1 overflow-auto"></div>
+                </div>
+                <!-- Right: Current -->
+                <div class="w-1/2 flex flex-col">
+                    <div
+                        class="flex-shrink-0 px-2 py-1 bg-gray-100 border-b border-gray-200 font-semibold text-center text-gray-600 text-[10px] uppercase tracking-wider">
+                        当前版本 (新)
+                    </div>
+                    <div id="diffRight" class="flex-1 overflow-auto"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <!-- Custom Confirm Modal -->
+    <div id="customConfirmModal"
+        class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[70] hidden">
+        <div class="bg-white rounded-lg shadow-xl max-w-sm w-full mx-4 overflow-hidden transform transition-all">
+            <div class="px-4 py-4">
+                <h3 id="confirmTitle" class="text-sm font-semibold text-gray-900 mb-2">确认</h3>
+                <p id="confirmMessage" class="text-xs text-gray-600 mb-4"></p>
+                <div class="flex justify-end space-x-2">
+                    <button id="confirmCancelBtn"
+                        class="px-3 py-1.5 border border-gray-300 rounded text-xs text-gray-700 hover:bg-gray-50 transition">
+                        取消
+                    </button>
+                    <button id="confirmOkBtn"
+                        class="px-3 py-1.5 bg-primary text-white rounded text-xs hover:bg-indigo-700 transition">确定
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Custom Prompt Modal -->
+    <div id="customPromptModal"
+        class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[70] hidden">
+        <div class="bg-white rounded-lg shadow-xl max-w-sm w-full mx-4 overflow-hidden transform transition-all">
+            <div class="px-4 py-4">
+                <h3 id="promptTitle" class="text-sm font-semibold text-gray-900 mb-2">输入</h3>
+                <input id="promptInput" type="text"
+                    class="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:ring-1 focus:ring-primary focus:border-transparent mb-4" />
+                <div class="flex justify-end space-x-2">
+                    <button id="promptCancelBtn"
+                        class="px-3 py-1.5 border border-gray-300 rounded text-xs text-gray-700 hover:bg-gray-50 transition">
+                        取消
+                    </button>
+                    <button id="promptOkBtn"
+                        class="px-3 py-1.5 bg-primary text-white rounded text-xs hover:bg-indigo-700 transition">确定
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+
+</html>

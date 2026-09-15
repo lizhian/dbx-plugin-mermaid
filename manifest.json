@@ -1,0 +1,29 @@
+{
+  "$schema":"https://raw.githubusercontent.com/t8y2/dbx/plugin-sdk-v1/plugins/manifest.schema.json",
+  "manifest_version":1,
+  "id":"io.github.lizhian.mermaid",
+  "name":"Mermaid 图表编辑器",
+  "version":"0.1.0",
+  "publisher":"lizhian",
+  "description":"Mermaid diagram editor with S3 and SQLite storage.",
+  "icon":"assets/plugin.svg",
+  "engines":{"dbx":">=0.5.68","host_api":"1"},
+  "entrypoints":{"backend":{"executable":"bin/dbx-plugin-dbx-plugin-mermaid"},"ui":{"root":"ui","entry":"ui/index.html"}},
+  "contributions":[
+    {"type":"connection-provider","id":"io.github.lizhian.mermaid.s3","label":"S3 远程存储","icon":"assets/plugin.svg","database_type":"mermaid-s3","description":"连接 AWS S3 或兼容 S3 的对象存储。","fields":[
+      {"key":"display_name","label":"连接名称","type":"text","binding":"name","required":true},
+      {"key":"endpoint","label":"Endpoint","type":"text","binding":"config","required":true},
+      {"key":"region","label":"Region","type":"text","binding":"config","default":"us-east-1"},
+      {"key":"bucket","label":"Bucket","type":"text","binding":"config","required":true},
+      {"key":"prefix","label":"Prefix","type":"text","binding":"config"},
+      {"key":"access_key_id","label":"Access Key ID","type":"text","binding":"secret","required":true},
+      {"key":"secret_access_key","label":"Secret Access Key","type":"password","binding":"secret","required":true}
+    ],"workbench":"io.github.lizhian.mermaid.workbench","capabilities":["test","connect","disconnect"]},
+    {"type":"connection-provider","id":"io.github.lizhian.mermaid.sqlite","label":"SQLite 本地存储","icon":"assets/plugin.svg","database_type":"mermaid-sqlite","description":"使用本地 SQLite 文件保存图表和版本历史。","fields":[
+      {"key":"display_name","label":"连接名称","type":"text","binding":"name","required":true},
+      {"key":"path","label":"SQLite 文件路径","type":"text","binding":"config","required":true,"placeholder":"/path/to/mermaid.db"}
+    ],"workbench":"io.github.lizhian.mermaid.workbench","capabilities":["test","connect","disconnect"]},
+    {"type":"workbench","id":"io.github.lizhian.mermaid.workbench","label":"Mermaid 图表编辑器","description":"编辑、预览和管理 Mermaid 图表。","icon":"assets/plugin.svg"}
+  ],
+  "localizations":{"zh-CN":{"name":"Mermaid 图表编辑器","description":"支持 S3 与 SQLite 的 Mermaid 图表编辑器"}}
+}
