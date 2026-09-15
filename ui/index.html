@@ -2333,7 +2333,7 @@
             document.getElementById('overrideImportBtn').addEventListener('click', () => importMarkdown(true));
 
             // S3 Events
-            document.getElementById('s3ConfigBtn').addEventListener('click', openS3ConfigModal);
+            document.getElementById('s3ConfigBtn')?.addEventListener('click', openS3ConfigModal);
             document.getElementById('closeS3ConfigModal').addEventListener('click', closeS3ConfigModal);
             document.getElementById('saveS3ConfigBtn').addEventListener('click', saveS3Config);
             document.getElementById('closeS3ListModal').addEventListener('click', closeS3ListModal);
