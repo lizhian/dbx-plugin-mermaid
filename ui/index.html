@@ -2645,27 +2645,47 @@
                 <span class="text-xs text-gray-400">
                     双击标签名称可修改
                 </span>
-                \1\2<i data-lucide="trash-2" aria-hidden="true"></i>\3
+                <button id="clearBtn" title="清空"
+                    class="flex items-center justify-center w-8 h-8 bg-gray-100 hover:bg-red-100 text-gray-700 hover:text-red-700 px-2 py-1 rounded text-xs font-medium transition">
+                    <i data-lucide="trash-2" aria-hidden="true"></i><span>清空</span>
                 </button>
                 <div class="h-4 w-px bg-gray-300"></div>
                 <div class="text-xs text-gray-500">
                     行数: <span id="lineCount" class="font-medium text-gray-700">1</span> | 字符: <span id="charCount"
                         class="font-medium text-gray-700">0</span>
                 </div>
-                \1\2<i data-lucide="copy" aria-hidden="true"></i>\3
+                <button id="copyBtn" title="复制代码"
+                    class="flex items-center justify-center w-8 h-8 bg-yellow-50 hover:bg-yellow-100 text-yellow-700 px-2 py-1 rounded text-xs font-medium transition">
+                    
+                    <i data-lucide="copy" aria-hidden="true"></i><span>复制代码</span>
                 </button>
 
-                \1\2<i data-lucide="code-2" aria-hidden="true"></i>\3
+                <button id="formatBtn" title="格式化"
+                    class="flex items-center justify-center w-8 h-8 bg-blue-50 hover:bg-blue-100 text-blue-700 px-2 py-1 rounded text-xs font-medium transition">
+                    
+                    <i data-lucide="code-2" aria-hidden="true"></i><span>格式化</span>
                 </button>
 
-                \1\2<i data-lucide="camera" aria-hidden="true"></i>\3
+                <button id="copyImageBtn" title="复制图片"
+                    class="flex items-center justify-center w-8 h-8 bg-purple-50 hover:bg-purple-100 text-purple-700 px-2 py-1 rounded text-xs font-medium transition">
+                    
+                    <i data-lucide="camera" aria-hidden="true"></i><span>复制图片</span>
                 </button>
 
-                \1\2<i data-lucide="download" aria-hidden="true"></i>\3
+                <button id="exportBtn" title="导出图片"
+                    class="flex items-center justify-center w-8 h-8 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 px-2 py-1 rounded text-xs font-medium transition">
+                    
+                    <i data-lucide="download" aria-hidden="true"></i><span>导出图片</span>
                 </button>
-                \1\2<i data-lucide="file-output" aria-hidden="true"></i>\3
+                <button id="exportMarkdownBtn" title="导出 Markdown"
+                    class="flex items-center justify-center w-8 h-8 bg-green-50 hover:bg-green-100 text-green-700 px-2 py-1 rounded text-xs font-medium transition">
+                    
+                    <i data-lucide="file-output" aria-hidden="true"></i><span>导出MD</span>
                 </button>
-                \1\2<i data-lucide="file-input" aria-hidden="true"></i>\3
+                <button id="importMarkdownBtn" title="导入 Markdown"
+                    class="flex items-center justify-center w-8 h-8 bg-orange-50 hover:bg-orange-100 text-orange-700 px-2 py-1 rounded text-xs font-medium transition">
+                    
+                    <i data-lucide="file-input" aria-hidden="true"></i><span>导入MD</span>
                 </button>
             </div>
         </header>
@@ -2737,15 +2757,15 @@
                         </h2>
 
                         <div class="zoom-controls">
-                            \1<i data-lucide="zoom-out" aria-hidden="true"></i><span class="sr-only">zoomOutBtn</span></button>
+                            <button id="zoomOutBtn" class="zoom-btn" title="缩小 (Ctrl + -)"><i data-lucide="zoom-out" aria-hidden="true"></i><span class="sr-only">zoomOutBtn</span></button>
                             <div class="zoom-separator"></div>
-                            \1<i data-lucide="maximize" aria-hidden="true"></i><span class="sr-only">fitToScreenBtn</span></button>
+                            <button id="fitToScreenBtn" class="zoom-btn" title="适应屏幕"><i data-lucide="maximize" aria-hidden="true"></i><span class="sr-only">fitToScreenBtn</span></button>
                             <div class="zoom-separator"></div>
                             <span class="zoom-percent" id="zoomPercent">100%</span>
                             <div class="zoom-separator"></div>
-                            \1<i data-lucide="refresh-cw" aria-hidden="true"></i><span class="sr-only">resetZoomBtn</span></button>
+                            <button id="resetZoomBtn" class="zoom-btn" title="重置缩放 (Ctrl + 0)"><i data-lucide="refresh-cw" aria-hidden="true"></i><span class="sr-only">resetZoomBtn</span></button>
                             <div class="zoom-separator"></div>
-                            \1<i data-lucide="zoom-in" aria-hidden="true"></i><span class="sr-only">zoomInBtn</span></button>
+                            <button id="zoomInBtn" class="zoom-btn" title="放大 (Ctrl + +)"><i data-lucide="zoom-in" aria-hidden="true"></i><span class="sr-only">zoomInBtn</span></button>
                         </div>
                     </div>
 
