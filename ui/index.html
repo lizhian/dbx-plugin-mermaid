@@ -585,10 +585,8 @@
                     </div>
                     <div class="hidden group-hover:flex items-center space-x-2">
                          <button class="text-gray-400 hover:text-blue-600 px-2" title="重命名" onclick="renameS3Item('${file.Key}', false)">
-                            <i class="fas fa-edit"></i>
                         </button>
                         <button class="text-gray-400 hover:text-red-600 px-2" title="删除" onclick="deleteS3Item('${file.Key}', false)">
-                            <i class="fas fa-trash-alt"></i>
                         </button>
                         <button class="text-primary hover:text-indigo-700 px-2 py-1 rounded text-xs font-medium" onclick="loadS3File('${file.Key}')">
                             加载
@@ -802,7 +800,7 @@
             const originalHTML = btn.innerHTML;
             if (!silent) {
                 btn.disabled = true;
-                btn.innerHTML = `<i class="fas fa-spinner fa-spin"></i><span>保存中...</span>`;
+                btn.innerHTML = `<span>保存中...</span>`;
             }
 
             try {
@@ -920,7 +918,7 @@
             if (state.currentFile.type === 's3') {
                 revertBtn.classList.remove('hidden');
                 const count = state.currentFile.backupCount || 0;
-                revertBtn.innerHTML = `<i class="fas fa-history"></i><span>回退 (${count})</span>`;
+                revertBtn.innerHTML = `<span>回退 (${count})</span>`;
             } else {
                 revertBtn.classList.add('hidden');
             }
@@ -957,7 +955,7 @@
 
             // Or simpler: We just use listS3Files logic but specialized render
 
-            listContainer.innerHTML = '<div class="text-center text-gray-500 py-4"><i class="fas fa-spinner fa-spin mr-2"></i>加载备份列表...</div>';
+            listContainer.innerHTML = '<div class="text-center text-gray-500 py-4">加载备份列表...</div>';
             document.getElementById('s3ListModal').classList.remove('hidden');
 
             try {
@@ -981,7 +979,6 @@
                         item.className = 'flex items-center justify-between p-3 hover:bg-gray-50 border-b border-gray-100 last:border-0 group';
                         item.innerHTML = `
                             <div class="flex items-center space-x-3 flex-1">
-                                <i class="fas fa-clock text-gray-400 text-lg"></i>
                                 <div class="flex flex-col flex-1">
                                     <div class="flex items-center justify-between">
                                          <span class="text-sm font-medium text-gray-700">${filename}</span>
@@ -1947,7 +1944,7 @@
 
             const btn = document.getElementById('copyImageBtn');
             const originalText = btn.innerHTML;
-            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i><span>处理中...</span>';
+            btn.innerHTML = '<span>处理中...</span>';
             btn.disabled = true;
 
             try {
@@ -2075,7 +2072,7 @@
             navigator.clipboard.writeText(code).then(() => {
                 const btn = document.getElementById('copyBtn');
                 const originalText = btn.innerHTML;
-                btn.innerHTML = '<i class="fas fa-check"></i><span>已复制</span>';
+                btn.innerHTML = '<span>已复制</span>';
                 btn.classList.add('bg-green-500', 'text-white');
                 setTimeout(() => {
                     btn.innerHTML = originalText;
@@ -2183,7 +2180,7 @@
             navigator.clipboard.writeText(content.value).then(() => {
                 const btn = document.getElementById('copyExportBtn');
                 const originalText = btn.innerHTML;
-                btn.innerHTML = '<i class="fas fa-check text-xs"></i><span>已复制</span>';
+                btn.innerHTML = '<span>已复制</span>';
                 btn.classList.add('bg-green-100', 'text-green-700');
                 setTimeout(() => {
                     btn.innerHTML = originalText;
@@ -2647,7 +2644,6 @@
                 </span>
                 <button id="clearBtn" title="清空"
                     class="flex items-center justify-center w-8 h-8 bg-gray-100 hover:bg-red-100 text-gray-700 hover:text-red-700 px-2 py-1 rounded text-xs font-medium transition">
-                    <i class="fas fa-trash-alt text-xs"></i>
                     <span>清空</span>
                 </button>
                 <div class="h-4 w-px bg-gray-300"></div>
@@ -2699,7 +2695,6 @@
                     <button id="addTabBtn"
                         class="flex items-center justify-center w-6 h-6 ml-2 text-gray-500 hover:text-primary hover:bg-gray-200 rounded transition"
                         title="添加新图表">
-                        <i class="fas fa-plus text-xs"></i>
                     </button>
                 </div>
 
@@ -2788,7 +2783,6 @@
                         class="hidden absolute bottom-4 left-4 right-4 mx-auto max-w-md p-3 bg-red-50/90 backdrop-blur border border-red-200 rounded-lg shadow-lg z-20">
                         <div class="flex items-start">
                             <div class="flex-shrink-0">
-                                <i class="fas fa-exclamation-circle text-red-500 text-sm"></i>
                             </div>
                             <div class="ml-2 flex-1">
                                 <h3 class="text-xs font-bold text-red-800">语法错误</h3>
@@ -2798,7 +2792,6 @@
                             </div>
                             <button onclick="document.getElementById('errorMessage').classList.add('hidden')"
                                 class="ml-2 text-red-400 hover:text-red-600">
-                                <i class="fas fa-times text-xs"></i>
                             </button>
                         </div>
                     </div>
@@ -2835,11 +2828,9 @@
                     class="px-3 py-1 border-t border-gray-200 bg-white text-xs text-gray-500 flex items-center justify-between h-[33px]">
                     <div class="flex items-center space-x-3">
                         <span class="flex items-center">
-                            <i class="fas fa-info-circle mr-1 text-xs"></i>
                             编辑器已就绪
                         </span>
                         <span id="renderStatus" class="text-green-600 flex items-center text-xs">
-                            <i class="fas fa-check-circle mr-1 text-xs"></i>
                             渲染正常
                         </span>
                     </div>
@@ -2847,7 +2838,6 @@
                         <button id="refreshBtn"
                             class="flex items-center justify-center w-6 h-5 text-gray-500 hover:text-primary hover:bg-gray-200 rounded transition mr-2"
                             title="刷新图表">
-                            <i class="fas fa-sync-alt text-xs"></i>
                         </button>
                         <span id="lastUpdated">最后更新: 刚刚</span>
                     </div>
@@ -2861,7 +2851,6 @@
             <div class="flex items-center justify-between px-4 py-3 border-b border-gray-200">
                 <h3 class="text-sm font-semibold text-gray-800">导出 Markdown</h3>
                 <button id="closeExportModal" class="text-gray-400 hover:text-gray-600 transition">
-                    <i class="fas fa-times"></i>
                 </button>
             </div>
             <div class="flex-1 overflow-auto p-4">
@@ -2873,12 +2862,10 @@
                 class="flex items-center justify-end space-x-3 px-4 py-3 border-t border-gray-200 bg-gray-50 rounded-b-lg">
                 <button id="copyExportBtn"
                     class="flex items-center space-x-1 bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-1.5 rounded text-xs font-medium transition">
-                    <i class="fas fa-copy text-xs"></i>
                     <span>复制</span>
                 </button>
                 <button id="downloadExportBtn"
                     class="flex items-center space-x-1 bg-primary hover:bg-indigo-700 text-white px-3 py-1.5 rounded text-xs font-medium transition">
-                    <i class="fas fa-download text-xs"></i>
                     <span>下载</span>
                 </button>
             </div>
@@ -2890,12 +2877,10 @@
             <div class="flex items-center justify-between px-4 py-3 border-b border-gray-200">
                 <h3 class="text-sm font-semibold text-gray-800">导入 Markdown</h3>
                 <button id="closeImportModal" class="text-gray-400 hover:text-gray-600 transition">
-                    <i class="fas fa-times"></i>
                 </button>
             </div>
             <div class="flex-1 overflow-auto p-4">
                 <div class="mb-3 p-2 bg-blue-50 border border-blue-200 rounded text-xs text-blue-800">
-                    <i class="fas fa-info-circle mr-1"></i>
                     请输入Markdown格式的图表内容，每个图表以"### 标题"开头，代码块使用"```mermaid"包裹
                 </div>
                 <textarea id="importContent"
@@ -2906,17 +2891,14 @@
                 class="flex items-center justify-end space-x-3 px-4 py-3 border-t border-gray-200 bg-gray-50 rounded-b-lg">
                 <button id="cancelImportBtn"
                     class="flex items-center space-x-1 bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-1.5 rounded text-xs font-medium transition">
-                    <i class="fas fa-times text-xs"></i>
                     <span>取消</span>
                 </button>
                 <button id="appendImportBtn"
                     class="flex items-center space-x-1 bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded text-xs font-medium transition">
-                    <i class="fas fa-plus text-xs"></i>
                     <span>增量导入</span>
                 </button>
                 <button id="overrideImportBtn"
                     class="flex items-center space-x-1 bg-red-600 hover:bg-red-700 text-white px-3 py-1.5 rounded text-xs font-medium transition">
-                    <i class="fas fa-trash-alt text-xs"></i>
                     <span>覆盖导入</span>
                 </button>
             </div>
@@ -2930,7 +2912,6 @@
             <div class="flex items-center justify-between px-6 py-4 border-b border-gray-200">
                 <h3 class="text-base font-semibold text-gray-800">系统设置</h3>
                 <button id="closeS3ConfigModal" class="text-gray-400 hover:text-gray-600 transition">
-                    <i class="fas fa-times"></i>
                 </button>
             </div>
 
@@ -2939,7 +2920,6 @@
                     <!-- Left Column: Storage -->
                     <div class="space-y-4">
                         <div class="flex items-center space-x-2 text-primary border-b border-gray-100 pb-2 mb-4">
-                            <i class="fas fa-database"></i>
                             <h4 class="text-sm font-bold uppercase tracking-wider">存储配置 (S3)</h4>
                         </div>
 
@@ -2972,8 +2952,7 @@
                                 class="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:ring-1 focus:ring-primary focus:border-transparent transition-shadow">
                         </div>
 
-                        <div class="text-[10px] text-yellow-700 bg-yellow-50 p-3 rounded border border-yellow-200 mt-4">
-                            <i class="fas fa-shield-alt mr-1"></i> 安全提示：密钥仅保存在您浏览器的 LocalStorage
+                        <div class="text-[10px] text-yellow-700 bg-yellow-50 p-3 rounded border border-yellow-200 mt-4"> 安全提示：密钥仅保存在您浏览器的 LocalStorage
                             中，不会发送到任何第三方服务器。
                         </div>
                     </div>
@@ -2984,7 +2963,6 @@
                         <!-- Backup Settings -->
                         <div class="space-y-4">
                             <div class="flex items-center space-x-2 text-secondary border-b border-gray-100 pb-2 mb-4">
-                                <i class="fas fa-history"></i>
                                 <h4 class="text-sm font-bold uppercase tracking-wider">备份策略</h4>
                             </div>
 
@@ -3015,7 +2993,6 @@
                         <!-- UI Settings -->
                         <div class="space-y-4">
                             <div class="flex items-center space-x-2 text-accent border-b border-gray-100 pb-2 mb-4">
-                                <i class="fas fa-image"></i>
                                 <h4 class="text-sm font-bold uppercase tracking-wider">导出设置</h4>
                             </div>
                             <div class="grid grid-cols-2 gap-4">
@@ -3052,7 +3029,6 @@
                 </button>
                 <button id="saveS3ConfigBtn"
                     class="flex items-center space-x-2 bg-primary hover:bg-indigo-700 text-white px-6 py-2 rounded text-xs font-medium transition shadow-sm hover:shadow">
-                    <i class="fas fa-check"></i>
                     <span>保存配置</span>
                 </button>
             </div>
@@ -3073,7 +3049,6 @@
                         
                     </button>
                     <button id="closeS3ListModal" class="text-gray-400 hover:text-gray-600 transition">
-                        <i class="fas fa-times"></i>
                     </button>
                 </div>
             </div>
@@ -3100,7 +3075,6 @@
                 <div class="space-x-2">
                     <button onclick="closeDiffModal()"
                         class="text-gray-500 hover:text-gray-700 hover:bg-gray-200 px-2 py-1 rounded transition">
-                        <i class="fas fa-times"></i>
                     </button>
                 </div>
             </div>
